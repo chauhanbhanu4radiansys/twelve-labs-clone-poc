@@ -55,3 +55,6 @@ Thumbs.db
 temp/
 tmp/
 
+# Pretrained model config files
+pretrained_models/**/hyperparams.yaml
+
