@@ -7,9 +7,9 @@ A comprehensive video processing and search application using multimodal embeddi
 - 🎬 **Video Upload & Processing**: Upload videos and automatically process them with scene detection
 - 🔍 **Multimodal Search**: Search videos using text, images, or audio queries
 - 📊 **AI Analysis**: Get AI-powered analysis of video content using OpenAI
-- 🌐 **Multilingual Support**: Supports Indian languages with automatic translation
+- 🌐 **Multilingual Support**: Automatic transcription and translation for multiple languages using Whisper
 - 🎯 **Scene Detection**: Automatic scene detection and segmentation
-- 📝 **Transcription**: Automatic audio transcription with Whisper and IndicConformer
+- 📝 **Transcription**: Automatic audio transcription with Whisper
 
 ## Prerequisites
 
