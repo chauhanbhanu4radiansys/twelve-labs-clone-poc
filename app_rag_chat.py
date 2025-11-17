@@ -4,6 +4,39 @@ from botocore.config import Config as BotoConfig
 from pymongo import MongoClient
 from bson import ObjectId
 import os
+import logging
+
+# Configure logging to suppress ImageBind warnings that can cause issues in multi-threaded environments
+# This prevents "I/O operation on closed file" errors when stderr is redirected in parallel threads
+# We need to configure this BEFORE importing imagebind to prevent logging issues
+
+# Create a null handler that discards all log messages
+class NullHandler(logging.Handler):
+    def emit(self, record):
+        pass
+
+# Configure ImageBind loggers to use null handler (thread-safe)
+try:
+    # Set level to CRITICAL to suppress all warnings
+    logging.getLogger('imagebind.data').setLevel(logging.CRITICAL)
+    logging.getLogger('imagebind').setLevel(logging.CRITICAL)
+    
+    # Remove existing handlers and add null handler
+    for logger_name in ['imagebind', 'imagebind.data']:
+        logger = logging.getLogger(logger_name)
+        logger.handlers = []  # Clear existing handlers
+        logger.addHandler(NullHandler())
+        logger.propagate = False  # Don't propagate to root logger
+except Exception:
+    pass  # If logging configuration fails, continue anyway
+
+# Suppress deprecation warnings from dependencies
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='imagebind')
+warnings.filterwarnings('ignore', category=UserWarning, module='transformers')
+warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
+warnings.filterwarnings('ignore', message='.*torch.utils._pytree._register_pytree_node is deprecated.*')
+warnings.filterwarnings('ignore', message='.*Torchaudio.*backend.*')
 
 # Pinecone import with version handling
 try:
@@ -26,11 +59,6 @@ except ImportError:
     st.error("Failed to import OpenAI Whisper. Please install it with: pip install openai-whisper")
     st.stop()
 try:
-    from nemo.collections.asr.models import EncDecClassificationModel, EncDecCTCModel, VADModel
-except ImportError:
-    st.error("Failed to import NeMo. Please ensure 'nemo_toolkit[asr]' is installed.")
-    st.stop()
-try:
     import torchaudio
 except ImportError:
     st.error("Failed to import torchaudio. Please ensure it is installed.")
@@ -43,9 +71,51 @@ from datetime import datetime
 import cv2
 from PIL import Image
 import torch
+import sys
+
+# Patch ImageBind's logging after importing to prevent stderr issues
+# This must be done after importing imagebind modules
+def _patch_imagebind_logging():
+    """Monkey-patch ImageBind's logging to prevent stderr issues in multi-threaded environments."""
+    try:
+        import imagebind.data as imagebind_data_module
+        
+        # Get the original warning function
+        original_warning = logging.warning
+        
+        def safe_warning(msg, *args, **kwargs):
+            """Safe warning that checks if stderr is available before logging."""
+            try:
+                # Check if stderr is available and not closed
+                if sys.stderr and (not hasattr(sys.stderr, 'closed') or not sys.stderr.closed):
+                    # Try to write a test to see if it's actually writable
+                    try:
+                        sys.stderr.write('')
+                        sys.stderr.flush()
+                        original_warning(msg, *args, **kwargs)
+                    except (ValueError, OSError, AttributeError):
+                        # stderr is closed or not writable, silently ignore
+                        pass
+            except (ValueError, AttributeError, OSError):
+                # Silently ignore if stderr is closed or unavailable
+                pass
+        
+        # Patch logging.warning globally to be safe
+        logging.warning = safe_warning
+        
+        # Also patch in imagebind.data module if it has its own logging reference
+        if hasattr(imagebind_data_module, 'logging'):
+            imagebind_data_module.logging.warning = safe_warning
+    except Exception:
+        pass  # If patching fails, continue anyway
+
+# Import ImageBind modules
 from imagebind import data
 from imagebind.models import imagebind_model
 from imagebind.models.imagebind_model import ModalityType
+
+# Apply the patch after import
+_patch_imagebind_logging()
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import AdaptiveDetector, ContentDetector
 import subprocess
@@ -56,7 +126,6 @@ import threading
 import concurrent.futures
 from io import BytesIO
 import numpy as np
-import sys
 from contextlib import redirect_stderr
 from typing import Any, Callable, Dict, List, Tuple
 import json
@@ -65,7 +134,6 @@ from functools import wraps
 from time import sleep
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from pydub import AudioSegment
-from audio_processing import identify_language, transcribe_indic_audio, translate_text_to_english
 
 # --- Constants ---
 BATCH_SIZE = 16
@@ -347,6 +415,7 @@ if s3_client is None or mongo_collection is None or video_pinecone_index is None
 @st.cache_resource
 def load_imagebind_model():
     """Loads the ImageBind model and caches it."""
+    # Try GPU first, but fallback to CPU if OOM
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     
     # Define the path to the local checkpoint (relative to project root)
@@ -355,34 +424,99 @@ def load_imagebind_model():
     
     status_placeholder = st.empty()
 
-    if not os.path.exists(checkpoint_path):
-        status_placeholder.info(f"Model checkpoint not found at '{checkpoint_path}'. Downloading model weights...")
-        st.warning("Falling back to downloading the model...")
-        model = imagebind_model.imagebind_huge(pretrained=True)
-        status_placeholder.empty()
-    else:
-        status_placeholder.info("Loading ImageBind model from local checkpoint...")
-        # Create model architecture first
-        model = imagebind_model.imagebind_huge(pretrained=False)
-        # Load checkpoint manually
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        # Handle different checkpoint formats
-        if isinstance(checkpoint, dict):
-            if 'model' in checkpoint:
-                model.load_state_dict(checkpoint['model'], strict=False)
-            elif 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'], strict=False)
+    try:
+        # Clear CUDA cache before loading to free up memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # Check available memory
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            allocated_memory = torch.cuda.memory_allocated(0)
+            reserved_memory = torch.cuda.memory_reserved(0)
+            free_memory = total_memory - reserved_memory
+            
+            if free_memory < 2 * 1024**3:  # Less than 2GB free
+                st.warning(
+                    f"GPU memory is low ({free_memory / 1024**3:.2f} GB free, "
+                    f"{reserved_memory / 1024**3:.2f} GB reserved). "
+                    f"Consider freeing GPU memory or the model will fallback to CPU. "
+                    f"You can also set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce fragmentation."
+                )
+        
+        if not os.path.exists(checkpoint_path):
+            status_placeholder.info(f"Model checkpoint not found at '{checkpoint_path}'. Downloading model weights...")
+            st.warning("Falling back to downloading the model...")
+            # Load to CPU first to avoid OOM during download
+            model = imagebind_model.imagebind_huge(pretrained=True)
+            status_placeholder.empty()
+        else:
+            status_placeholder.info("Loading ImageBind model from local checkpoint...")
+            # Create model architecture first
+            model = imagebind_model.imagebind_huge(pretrained=False)
+            # Load checkpoint to CPU first to avoid OOM, then move to device
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict):
+                if 'model' in checkpoint:
+                    model.load_state_dict(checkpoint['model'], strict=False)
+                elif 'state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['state_dict'], strict=False)
+                else:
+                    model.load_state_dict(checkpoint, strict=False)
             else:
                 model.load_state_dict(checkpoint, strict=False)
-        else:
-            model.load_state_dict(checkpoint, strict=False)
-        
-        # Clear the loading message once done
-        status_placeholder.empty()
+            
+            # Clear the loading message once done
+            status_placeholder.empty()
 
-    model.eval()
-    model.to(device)
-    return model, device
+        model.eval()
+        
+        # Try to move to device, fallback to CPU if OOM
+        try:
+            model.to(device)
+            if device.startswith('cuda'):
+                # Verify model is actually on GPU
+                next(model.parameters()).device
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if device.startswith('cuda'):
+                st.warning(f"CUDA out of memory. Falling back to CPU. Error: {e}")
+                device = "cpu"
+                torch.cuda.empty_cache()  # Clear GPU cache
+                model.to(device)
+            else:
+                raise
+        
+        return model, device
+        
+    except Exception as e:
+        status_placeholder.error(f"Failed to load ImageBind model: {e}")
+        # Try CPU as last resort
+        if device.startswith('cuda'):
+            try:
+                st.warning("Attempting to load model on CPU as fallback...")
+                device = "cpu"
+                if os.path.exists(checkpoint_path):
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                    model = imagebind_model.imagebind_huge(pretrained=False)
+                    if isinstance(checkpoint, dict):
+                        if 'model' in checkpoint:
+                            model.load_state_dict(checkpoint['model'], strict=False)
+                        elif 'state_dict' in checkpoint:
+                            model.load_state_dict(checkpoint['state_dict'], strict=False)
+                        else:
+                            model.load_state_dict(checkpoint, strict=False)
+                    else:
+                        model.load_state_dict(checkpoint, strict=False)
+                else:
+                    model = imagebind_model.imagebind_huge(pretrained=True)
+                model.eval()
+                model.to(device)
+                st.info("Model loaded successfully on CPU.")
+                return model, device
+            except Exception as cpu_error:
+                st.error(f"Failed to load model even on CPU: {cpu_error}")
+                raise
+        else:
+            raise
 
 model, device = load_imagebind_model()
 
@@ -396,34 +530,6 @@ def load_whisper_model(model_name: str = "base"):
         return None
 
 whisper_model = load_whisper_model()
-indic_lid_model = load_indic_lid_model()
-indic_conformer_model = load_indic_conformer_model()
-vad_model = load_vad_model()
-
-@st.cache_resource
-def load_indic_lid_model():
-    """Loads the IndicLID model and caches it."""
-    st.info("Loading IndicLID model...")
-    try:
-        model = EncDecClassificationModel.from_pretrained(model_name="ai4bharat/IndicLID")
-        st.info("IndicLID model loaded successfully.")
-        return model
-    except Exception as e:
-        st.error(f"Could not load IndicLID model: {e}")
-        return None
-
-
-@st.cache_resource
-def load_indic_conformer_model():
-    """Loads the IndicConformer model and caches it."""
-    st.info("Loading IndicConformer model...")
-    try:
-        model = EncDecCTCModel.from_pretrained(model_name="ai4bharat/IndicConformer")
-        st.info("IndicConformer model loaded successfully.")
-        return model
-    except Exception as e:
-        st.error(f"Could not load IndicConformer model: {e}")
-        return None
 
 
 @st.cache_resource
@@ -441,28 +547,13 @@ caption_processor, caption_model = load_captioning_model()
 if caption_model and caption_processor and torch.cuda.is_available():
     caption_model.to("cuda:0")
 
-@st.cache_resource
-def load_vad_model():
-    """Loads the NeMo VAD model and caches it."""
-    st.info("Loading VAD model...")
-    try:
-        model = VADModel.from_pretrained(model_name="vad_multilingual_marblenet")
-        st.info("VAD model loaded successfully.")
-        return model
-    except Exception as e:
-        st.error(f"Could not load VAD model: {e}")
-        return None
 
 
 # --- Video Processing and Embedding Logic ---
 
 def transcribe_video_with_whisper(
     video_path: str, 
-    whisper_model,
-    lid_model,
-    conformer_model,
-    vad_model,
-    openai_client
+    whisper_model
 ) -> Tuple[list, str | None]:
     """
     Extracts audio from a video, saves it as a WAV file, and transcribes it.
@@ -483,22 +574,7 @@ def transcribe_video_with_whisper(
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         if os.path.exists(audio_path) and os.path.getsize(audio_path) > 44:
-            # New audio processing flow
-            language_type = identify_language(audio_path, lid_model)
-            
-            if language_type == "indian":
-                native_segments = transcribe_indic_audio(audio_path, conformer_model, vad_model)
-                translated_segments = []
-                for segment in native_segments:
-                    english_text = translate_text_to_english(segment['text'], openai_client)
-                    translated_segments.append({
-                        "start": segment['start'],
-                        "end": segment['end'],
-                        "text": english_text
-                    })
-                return translated_segments, audio_path
-            
-            # For "english" or "other", use Whisper.
+            # Use Whisper for transcription
             # task="translate" will transcribe and translate non-English audio.
             result = whisper_model.transcribe(audio_path, fp16=torch.cuda.is_available(), task='translate')
             return result.get("segments", []), audio_path
@@ -516,11 +592,7 @@ def transcribe_video_with_whisper(
 
 def transcribe_audio(
     audio_path: str, 
-    whisper_model,
-    lid_model,
-    conformer_model,
-    vad_model,
-    openai_client
+    whisper_model
 ) -> str:
     """Transcribes a standalone audio file and returns the full text."""
     if not whisper_model or not os.path.exists(audio_path):
@@ -536,17 +608,7 @@ def transcribe_audio(
         try:
             subprocess.run(cmd, check=True, capture_output=True)
             if os.path.exists(wav_path) and os.path.getsize(wav_path) > 44:
-                # New audio processing flow
-                language_type = identify_language(wav_path, lid_model)
-                
-                if language_type == "indian":
-                    native_segments = transcribe_indic_audio(wav_path, conformer_model, vad_model)
-                    # For standalone audio, we return the full text.
-                    full_text = " ".join([seg['text'] for seg in native_segments])
-                    english_transcript = translate_text_to_english(full_text, openai_client)
-                    return english_transcript.strip()
-                
-                # For "english" or "other", use Whisper
+                # Use Whisper for transcription
                 result = whisper_model.transcribe(wav_path, fp16=torch.cuda.is_available(), task='translate')
                 return result.get("text", "").strip()
         except (subprocess.CalledProcessError, FileNotFoundError, Exception) as e:
@@ -803,45 +865,43 @@ def detect_scenes_with_adaptive_detector(video_path: str) -> list:
         List of all detected scenes from SceneManager
     """
     video_stream = None
-    original_stderr = sys.stderr
-    devnull = open(os.devnull, 'w')
-    sys.stderr = devnull
-    try:
-        video_stream = open_video(video_path)
-        scene_manager = SceneManager()
-        # Use AdaptiveDetector with adaptive threshold 3 and custom weights
-        # weights: (hue, saturation, luminosity, edges) = (1, 1, 5, 0)
-        # Create Components object with custom weights
-        custom_weights = ContentDetector.Components(
-            delta_hue=1.0,
-            delta_sat=1.0,
-            delta_lum=5.0,
-            delta_edges=0.0
-        )
-        scene_manager.add_detector(AdaptiveDetector(
-            adaptive_threshold=1.0,
-            weights=custom_weights
-        ))
-        scene_manager.detect_scenes(video_stream, show_progress=False)
-        scene_list = scene_manager.get_scene_list()
-        
-        return scene_list
-    except Exception as e:
-        st.warning(f"Scene detection failed for {os.path.basename(video_path)}: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-    finally:
-        # Restore stderr and close the devnull stream
-        sys.stderr = original_stderr
-        devnull.close()
-        # Try to close video stream if it has a close method
-        if video_stream:
+    # Use context manager for stderr redirection to avoid thread-safety issues
+    # This ensures stderr is properly restored even if exceptions occur
+    with open(os.devnull, 'w') as devnull:
+        with redirect_stderr(devnull):
             try:
-                if hasattr(video_stream, 'close'):
-                    video_stream.close()
-            except Exception:
-                pass
+                video_stream = open_video(video_path)
+                scene_manager = SceneManager()
+                # Use AdaptiveDetector with adaptive threshold 3 and custom weights
+                # weights: (hue, saturation, luminosity, edges) = (1, 1, 5, 0)
+                # Create Components object with custom weights
+                custom_weights = ContentDetector.Components(
+                    delta_hue=1.0,
+                    delta_sat=1.0,
+                    delta_lum=5.0,
+                    delta_edges=0.0
+                )
+                scene_manager.add_detector(AdaptiveDetector(
+                    adaptive_threshold=1.0,
+                    weights=custom_weights
+                ))
+                scene_manager.detect_scenes(video_stream, show_progress=False)
+                scene_list = scene_manager.get_scene_list()
+                
+                return scene_list
+            except Exception as e:
+                st.warning(f"Scene detection failed for {os.path.basename(video_path)}: {e}")
+                import traceback
+                traceback.print_exc()
+                return []
+            finally:
+                # Try to close video stream if it has a close method
+                if video_stream:
+                    try:
+                        if hasattr(video_stream, 'close'):
+                            video_stream.close()
+                    except Exception:
+                        pass
 
 def resize_frame_optimized(frame_np, max_size: int = 512) -> Image.Image:
     """
@@ -886,11 +946,20 @@ def get_batch_embeddings(
     # Process audio if any
     if audio_paths:
         try:
-            audio_inputs = {ModalityType.AUDIO: data.load_and_transform_audio_data(audio_paths, device)}
-            with torch.no_grad():
-                audio_embeddings = model(audio_inputs)[ModalityType.AUDIO]
-        except Exception as e:
-            print(f"Error getting audio embeddings: {e}")
+            # Filter out empty or invalid audio paths
+            valid_audio_paths = [path for path in audio_paths if path and os.path.exists(path)]
+            if valid_audio_paths:
+                audio_inputs = {ModalityType.AUDIO: data.load_and_transform_audio_data(valid_audio_paths, device)}
+                with torch.no_grad():
+                    audio_embeddings = model(audio_inputs)[ModalityType.AUDIO]
+        except (ValueError, OSError, Exception) as e:
+            # Handle various errors including logging errors from ImageBind
+            error_msg = str(e)
+            if "I/O operation on closed file" in error_msg or "logging" in error_msg.lower():
+                # Silently skip if it's a logging/stderr issue - audio embeddings will be empty
+                pass
+            else:
+                print(f"Error getting audio embeddings: {e}", file=sys.stderr)
             
     # Process text if any
     if texts:
@@ -1183,7 +1252,7 @@ def process_video_chunk(
     return all_scene_data_mongo, temp_audio_clips
 
 
-def process_video_and_generate_embeddings(video_path: str, video_doc_id: str, video_name: str, minio_key: str, status_cb, whisper_model, lid_model, conformer_model, vad_model, openai_client):
+def process_video_and_generate_embeddings(video_path: str, video_doc_id: str, video_name: str, minio_key: str, status_cb, whisper_model):
     """The main processing pipeline for a single video."""
     audio_path = None
     temp_audio_clips = []
@@ -1200,7 +1269,7 @@ def process_video_and_generate_embeddings(video_path: str, video_doc_id: str, vi
         }})
 
         status_cb("Step 2/6: Transcribing full video audio...")
-        transcript_segments, audio_path = transcribe_video_with_whisper(video_path, whisper_model, lid_model, conformer_model, vad_model, openai_client)
+        transcript_segments, audio_path = transcribe_video_with_whisper(video_path, whisper_model)
         if not transcript_segments:
             status_cb("Warning: Could not generate transcript. Audio processing will be skipped.")
 
@@ -1571,11 +1640,7 @@ def perform_audio_search(temp_file_path):
     # 2. Transcribe audio, generate text embedding, and prepare text search task
     transcript = transcribe_audio(
         temp_file_path, 
-        whisper_model,
-        indic_lid_model,
-        indic_conformer_model,
-        vad_model,
-        openai_client
+        whisper_model
     )
     if transcript:
         st.info(f"Extracted transcript: \"{transcript}\"")
@@ -1871,7 +1936,7 @@ with tab1:
                 # --- Start timing the process ---
                 start_time = time.time()
                 
-                process_video_and_generate_embeddings(processing_path, video_doc_id, uploaded_file.name, minio_key, status_update, whisper_model, indic_lid_model, indic_conformer_model, vad_model, openai_client)
+                process_video_and_generate_embeddings(processing_path, video_doc_id, uploaded_file.name, minio_key, status_update, whisper_model)
                 
                 # --- End timing and save duration ---
                 end_time = time.time()
@@ -1963,7 +2028,7 @@ with tab1:
                     start_time = time.time()
 
                     # Process the video from the temp file
-                    process_video_and_generate_embeddings(processing_path, video_doc_id, uploaded_file.name, minio_key, status_update, whisper_model, indic_lid_model, indic_conformer_model, vad_model, openai_client)
+                    process_video_and_generate_embeddings(processing_path, video_doc_id, uploaded_file.name, minio_key, status_update, whisper_model)
                     
                     # --- End timing and save duration ---
                     end_time = time.time()
