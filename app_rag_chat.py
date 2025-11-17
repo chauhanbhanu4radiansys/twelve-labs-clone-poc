@@ -17,13 +17,14 @@ class NullHandler(logging.Handler):
 
 # Configure ImageBind loggers to use null handler (thread-safe)
 try:
-    # Set level to CRITICAL to suppress all warnings
-    logging.getLogger('imagebind.data').setLevel(logging.CRITICAL)
-    logging.getLogger('imagebind').setLevel(logging.CRITICAL)
+    # Completely disable logging for imagebind modules to prevent stderr issues in threads
+    logging.getLogger('imagebind.data').disabled = True
+    logging.getLogger('imagebind').disabled = True
     
-    # Remove existing handlers and add null handler
+    # Also set level to CRITICAL and add null handler as backup
     for logger_name in ['imagebind', 'imagebind.data']:
         logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.CRITICAL)
         logger.handlers = []  # Clear existing handlers
         logger.addHandler(NullHandler())
         logger.propagate = False  # Don't propagate to root logger
@@ -73,41 +74,41 @@ from PIL import Image
 import torch
 import sys
 
+# Store original warning function at module level to avoid recursion
+# _original_logging_warning = logging.warning
+
 # Patch ImageBind's logging after importing to prevent stderr issues
 # This must be done after importing imagebind modules
-def _patch_imagebind_logging():
-    """Monkey-patch ImageBind's logging to prevent stderr issues in multi-threaded environments."""
-    try:
-        import imagebind.data as imagebind_data_module
+# def _patch_imagebind_logging():
+#     """Monkey-patch ImageBind's logging to prevent stderr issues in multi-threaded environments."""
+#     try:
+#         import imagebind.data as imagebind_data_module
         
-        # Get the original warning function
-        original_warning = logging.warning
+#         def safe_warning(msg, *args, **kwargs):
+#             """Safe warning that checks if stderr is available before logging."""
+#             try:
+#                 # Check if stderr is available and not closed
+#                 if sys.stderr and (not hasattr(sys.stderr, 'closed') or not sys.stderr.closed):
+#                     # Try to write a test to see if it's actually writable
+#                     try:
+#                         sys.stderr.write('')
+#                         sys.stderr.flush()
+#                         _original_logging_warning(msg, *args, **kwargs)
+#                     except (ValueError, OSError, AttributeError):
+#                         # stderr is closed or not writable, silently ignore
+#                         pass
+#             except (ValueError, AttributeError, OSError):
+#                 # Silently ignore if stderr is closed or unavailable
+#                 pass
         
-        def safe_warning(msg, *args, **kwargs):
-            """Safe warning that checks if stderr is available before logging."""
-            try:
-                # Check if stderr is available and not closed
-                if sys.stderr and (not hasattr(sys.stderr, 'closed') or not sys.stderr.closed):
-                    # Try to write a test to see if it's actually writable
-                    try:
-                        sys.stderr.write('')
-                        sys.stderr.flush()
-                        original_warning(msg, *args, **kwargs)
-                    except (ValueError, OSError, AttributeError):
-                        # stderr is closed or not writable, silently ignore
-                        pass
-            except (ValueError, AttributeError, OSError):
-                # Silently ignore if stderr is closed or unavailable
-                pass
+#         # Patch logging.warning globally to be safe
+#         logging.warning = safe_warning
         
-        # Patch logging.warning globally to be safe
-        logging.warning = safe_warning
-        
-        # Also patch in imagebind.data module if it has its own logging reference
-        if hasattr(imagebind_data_module, 'logging'):
-            imagebind_data_module.logging.warning = safe_warning
-    except Exception:
-        pass  # If patching fails, continue anyway
+#         # Also patch in imagebind.data module if it has its own logging reference
+#         if hasattr(imagebind_data_module, 'logging'):
+#             imagebind_data_module.logging.warning = safe_warning
+#     except Exception:
+#         pass  # If patching fails, continue anyway
 
 # Import ImageBind modules
 from imagebind import data
@@ -115,7 +116,7 @@ from imagebind.models import imagebind_model
 from imagebind.models.imagebind_model import ModalityType
 
 # Apply the patch after import
-_patch_imagebind_logging()
+# _patch_imagebind_logging()
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import AdaptiveDetector, ContentDetector
 import subprocess
