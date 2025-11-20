@@ -17,13 +17,14 @@ class NullHandler(logging.Handler):
 
 # Configure ImageBind loggers to use null handler (thread-safe)
 try:
-    # Set level to CRITICAL to suppress all warnings
-    logging.getLogger('imagebind.data').setLevel(logging.CRITICAL)
-    logging.getLogger('imagebind').setLevel(logging.CRITICAL)
+    # Completely disable logging for imagebind modules to prevent stderr issues in threads
+    logging.getLogger('imagebind.data').disabled = True
+    logging.getLogger('imagebind').disabled = True
     
-    # Remove existing handlers and add null handler
+    # Also set level to CRITICAL and add null handler as backup
     for logger_name in ['imagebind', 'imagebind.data']:
         logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.CRITICAL)
         logger.handlers = []  # Clear existing handlers
         logger.addHandler(NullHandler())
         logger.propagate = False  # Don't propagate to root logger
@@ -73,15 +74,15 @@ from PIL import Image
 import torch
 import sys
 
+# Store original warning function at module level to avoid recursion
+_original_logging_warning = logging.warning
+
 # Patch ImageBind's logging after importing to prevent stderr issues
 # This must be done after importing imagebind modules
 def _patch_imagebind_logging():
     """Monkey-patch ImageBind's logging to prevent stderr issues in multi-threaded environments."""
     try:
         import imagebind.data as imagebind_data_module
-        
-        # Get the original warning function
-        original_warning = logging.warning
         
         def safe_warning(msg, *args, **kwargs):
             """Safe warning that checks if stderr is available before logging."""
@@ -92,7 +93,7 @@ def _patch_imagebind_logging():
                     try:
                         sys.stderr.write('')
                         sys.stderr.flush()
-                        original_warning(msg, *args, **kwargs)
+                        _original_logging_warning(msg, *args, **kwargs)
                     except (ValueError, OSError, AttributeError):
                         # stderr is closed or not writable, silently ignore
                         pass
