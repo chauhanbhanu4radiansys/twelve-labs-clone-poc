@@ -257,9 +257,9 @@ def process_video(
         
         # Download video from pre-signed URL
         status_callback("Downloading video from URL...")
-        video_path = download_from_url(videoPathURL)
+        video_path = download_from_url(videoPathURL, progress_callback=status_callback)
         if not video_path or not os.path.exists(video_path):
-            raise Exception("Failed to download video from URL")
+            raise Exception(f"Failed to download video from URL: {videoPathURL[:100]}...")
         status_callback(f"Video downloaded to temporary file: {video_path}")
         
         # Download transcript from pre-signed URL

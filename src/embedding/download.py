@@ -4,10 +4,10 @@ Download utilities for pre-signed S3 URLs
 import os
 import tempfile
 import requests
-from typing import Optional
+from typing import Optional, Callable
 
 
-def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: int = 8192) -> Optional[str]:
+def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: int = 1024 * 1024, progress_callback: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """
     Downloads a file from a pre-signed S3 URL.
     
@@ -15,10 +15,14 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
         url: Pre-signed S3 URL
         output_path: Optional output path. If None, creates a temporary file.
         chunk_size: Chunk size for streaming download
+        progress_callback: Optional callback function(status_message) for progress updates
         
     Returns:
         Path to downloaded file, or None if download failed
     """
+    if progress_callback is None:
+        progress_callback = print
+    
     try:
         if output_path is None:
             # Create temporary file
@@ -27,18 +31,64 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
             output_path = temp_file.name
             temp_file.close()
         
-        # Download with streaming
-        response = requests.get(url, stream=True, timeout=300)
-        response.raise_for_status()
+        progress_callback(f"Starting download from URL...")
+        progress_callback(f"Output path: {output_path}")
         
+        # Download with streaming
+        response = requests.get(url, stream=True, timeout=300, allow_redirects=True)
+        
+        # Check status code
+        if response.status_code != 200:
+            raise Exception(f"HTTP {response.status_code}: {response.reason}")
+        
+        # Get content length if available
+        total_size = response.headers.get('content-length')
+        if total_size:
+            total_size = int(total_size)
+            progress_callback(f"File size: {total_size / (1024*1024):.2f} MB")
+        
+        downloaded = 0
         with open(output_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=chunk_size):
                 if chunk:
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size and downloaded % (1024 * 1024) == 0:  # Update every MB
+                        progress = (downloaded / total_size) * 100
+                        progress_callback(f"Downloaded: {downloaded / (1024*1024):.2f} MB ({progress:.1f}%)")
         
+        # Verify file was downloaded
+        if not os.path.exists(output_path):
+            raise Exception("Downloaded file does not exist")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size == 0:
+            raise Exception("Downloaded file is empty")
+        
+        progress_callback(f"Download complete: {file_size / (1024*1024):.2f} MB")
         return output_path
+        
+    except requests.exceptions.Timeout:
+        error_msg = "Download timeout (300s exceeded)"
+        print(f"Error: {error_msg}")
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        return None
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Request error: {str(e)}"
+        print(f"Error: {error_msg}")
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        return None
     except Exception as e:
-        print(f"Error downloading from URL: {e}")
+        error_msg = f"Error downloading from URL: {type(e).__name__}: {str(e)}"
+        print(f"Error: {error_msg}")
         if output_path and os.path.exists(output_path):
             try:
                 os.remove(output_path)
