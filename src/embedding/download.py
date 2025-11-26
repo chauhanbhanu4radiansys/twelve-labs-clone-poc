@@ -7,14 +7,14 @@ import requests
 from typing import Optional, Callable
 
 
-def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: int = 1024 * 1024, progress_callback: Optional[Callable[[str], None]] = None) -> Optional[str]:
+def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: int = 8 * 1024 * 1024, progress_callback: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """
     Downloads a file from a pre-signed S3 URL.
     
     Args:
         url: Pre-signed S3 URL
         output_path: Optional output path. If None, creates a temporary file.
-        chunk_size: Chunk size for streaming download
+        chunk_size: Chunk size for streaming download (default: 8MB for better performance)
         progress_callback: Optional callback function(status_message) for progress updates
         
     Returns:
@@ -23,6 +23,7 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
     if progress_callback is None:
         progress_callback = print
     
+    session = None
     try:
         if output_path is None:
             # Create temporary file
@@ -31,31 +32,27 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
             output_path = temp_file.name
             temp_file.close()
         
-        progress_callback(f"Starting download from URL...")
-        progress_callback(f"Output path: {output_path}")
+        progress_callback("Downloading...")
+        
+        # Use session for connection pooling and better performance
+        session = requests.Session()
+        session.headers.update({
+            'Connection': 'keep-alive',
+            'Accept-Encoding': 'gzip, deflate'
+        })
         
         # Download with streaming
-        response = requests.get(url, stream=True, timeout=300, allow_redirects=True)
+        response = session.get(url, stream=True, timeout=300, allow_redirects=True)
         
         # Check status code
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.reason}")
         
-        # Get content length if available
-        total_size = response.headers.get('content-length')
-        if total_size:
-            total_size = int(total_size)
-            progress_callback(f"File size: {total_size / (1024*1024):.2f} MB")
-        
-        downloaded = 0
+        # Download without progress callbacks in the loop for maximum speed
         with open(output_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=chunk_size):
                 if chunk:
                     f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size and downloaded % (1024 * 1024) == 0:  # Update every MB
-                        progress = (downloaded / total_size) * 100
-                        progress_callback(f"Downloaded: {downloaded / (1024*1024):.2f} MB ({progress:.1f}%)")
         
         # Verify file was downloaded
         if not os.path.exists(output_path):
@@ -95,6 +92,9 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
             except:
                 pass
         return None
+    finally:
+        if session:
+            session.close()
 
 
 def download_transcript_from_url(url: str) -> Optional[list]:
@@ -128,4 +128,3 @@ def download_transcript_from_url(url: str) -> Optional[list]:
     except Exception as e:
         print(f"Error downloading/parsing transcript from URL: {e}")
         return None
-
