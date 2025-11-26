@@ -4,8 +4,15 @@ Embedding generation using ImageBind
 import os
 import tempfile
 import torch
+import logging
+import warnings
 from typing import List, Tuple
 from PIL import Image
+
+# Suppress ImageBind logging warnings before importing
+warnings.filterwarnings('ignore', message='.*Large gap between audio.*')
+logging.getLogger('imagebind.data').setLevel(logging.ERROR)
+logging.getLogger('imagebind').setLevel(logging.ERROR)
 
 from imagebind import data
 from imagebind.models.imagebind_model import ModalityType
@@ -47,11 +54,26 @@ def get_batch_embeddings(
         try:
             valid_audio_paths = [path for path in audio_paths if path and os.path.exists(path)]
             if valid_audio_paths:
-                audio_inputs = {ModalityType.AUDIO: data.load_and_transform_audio_data(valid_audio_paths, device)}
-                with torch.no_grad():
-                    audio_embeddings = model(audio_inputs)[ModalityType.AUDIO]
+                # Suppress ImageBind logging to prevent thread-safety issues
+                imagebind_logger = logging.getLogger('imagebind.data')
+                imagebind_logger.setLevel(logging.CRITICAL)
+                
+                try:
+                    audio_inputs = {ModalityType.AUDIO: data.load_and_transform_audio_data(valid_audio_paths, device)}
+                    with torch.no_grad():
+                        audio_embeddings = model(audio_inputs)[ModalityType.AUDIO]
+                except ValueError as ve:
+                    # Suppress logging errors - they don't affect functionality
+                    error_str = str(ve)
+                    if "I/O operation on closed file" in error_str or "logging" in error_str.lower():
+                        # Logging error, ignore it and continue
+                        pass
+                    else:
+                        # Real ValueError, re-raise
+                        raise
         except (ValueError, OSError, Exception) as e:
             error_msg = str(e)
+            # Ignore logging errors and I/O errors on closed files
             if "I/O operation on closed file" not in error_msg and "logging" not in error_msg.lower():
                 print(f"Error getting audio embeddings: {e}")
             

@@ -13,16 +13,45 @@ warnings.filterwarnings('ignore', category=UserWarning, module='transformers')
 warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
 warnings.filterwarnings('ignore', message='.*torch.utils._pytree._register_pytree_node is deprecated.*')
 warnings.filterwarnings('ignore', message='.*Torchaudio.*backend.*')
+warnings.filterwarnings('ignore', message='.*Large gap between audio.*')
 
-# Configure ImageBind logging
+# Configure thread-safe logging to prevent "I/O operation on closed file" errors
+class NullHandler(logging.Handler):
+    """A handler that does nothing, preventing logging errors in threads."""
+    def emit(self, record):
+        pass
+    
+    def handle(self, record):
+        pass
+    
+    def flush(self):
+        pass
+
+# Configure ImageBind logging to be thread-safe
 try:
-    logging.getLogger('imagebind.data').disabled = True
-    logging.getLogger('imagebind').disabled = True
-    for logger_name in ['imagebind', 'imagebind.data']:
+    # Disable all ImageBind loggers completely
+    for logger_name in ['imagebind', 'imagebind.data', 'imagebind.models']:
         logger = logging.getLogger(logger_name)
+        logger.disabled = True
         logger.setLevel(logging.CRITICAL)
-        logger.handlers = []
+        # Remove all existing handlers that might be closed
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+        # Add a null handler to prevent errors
+        null_handler = NullHandler()
+        logger.addHandler(null_handler)
         logger.propagate = False
+    
+    # Patch logging to handle closed file errors gracefully
+    original_emit = logging.StreamHandler.emit
+    def safe_emit(self, record):
+        try:
+            original_emit(self, record)
+        except (ValueError, OSError) as e:
+            # Ignore "I/O operation on closed file" errors
+            if "closed file" not in str(e).lower():
+                raise
+    logging.StreamHandler.emit = safe_emit
 except Exception:
     pass
 

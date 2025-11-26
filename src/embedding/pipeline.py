@@ -6,9 +6,16 @@ import sys
 import uuid
 import tempfile
 import concurrent.futures
+import logging
+import warnings
 import cv2
 from typing import Dict, List, Any, Tuple, Callable, Optional
 from pydub import AudioSegment
+
+# Suppress ImageBind logging warnings before any imports
+warnings.filterwarnings('ignore', message='.*Large gap between audio.*')
+logging.getLogger('imagebind.data').setLevel(logging.CRITICAL)
+logging.getLogger('imagebind').setLevel(logging.CRITICAL)
 
 from .config import PINECONE_CONFIG, BATCH_SIZE
 from .models import load_imagebind_model, load_captioning_model
