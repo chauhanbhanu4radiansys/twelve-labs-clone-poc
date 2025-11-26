@@ -24,6 +24,7 @@ scenedetect[opencv]>=0.6.2
 
 # Audio processing
 pydub>=0.25.1
+torchcodec  # Required for audio loading in newer torchaudio/ImageBind versions
 
 # Vector database
 pinecone>=3.0.0
