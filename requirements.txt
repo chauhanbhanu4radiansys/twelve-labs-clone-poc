@@ -6,7 +6,7 @@ torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
 
-# ImageBind dependencies (will be installed from git in setup.sh)
+# ImageBind dependencies (ImageBind will be installed from git in setup.sh/Dockerfile)
 numpy<2.0
 timm>=0.9.0
 ftfy>=6.1.0
