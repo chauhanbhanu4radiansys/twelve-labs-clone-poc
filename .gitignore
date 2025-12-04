@@ -4,6 +4,7 @@
 *.pth
 *.ckpt
 *.pt
+.env
 
 # Streamlit secrets (contains sensitive credentials)
 .streamlit/secrets.toml

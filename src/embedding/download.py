@@ -9,19 +9,34 @@ from typing import Optional, Callable
 
 def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: int = 8 * 1024 * 1024, progress_callback: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """
-    Downloads a file from a pre-signed S3 URL.
+    Downloads a file from a pre-signed S3 URL or returns local file path if already local.
     
     Args:
-        url: Pre-signed S3 URL
-        output_path: Optional output path. If None, creates a temporary file.
+        url: Pre-signed S3 URL or local file path (file:// or /path/to/file)
+        output_path: Optional output path. If None, creates a temporary file (for URLs only).
         chunk_size: Chunk size for streaming download (default: 8MB for better performance)
         progress_callback: Optional callback function(status_message) for progress updates
         
     Returns:
-        Path to downloaded file, or None if download failed
+        Path to downloaded file or local file path, or None if download failed
     """
     if progress_callback is None:
         progress_callback = print
+    
+    # Check if it's a local file path (file:// protocol or absolute path)
+    local_path = None
+    if url.startswith('file://'):
+        local_path = url[7:]  # Remove 'file://' prefix
+    elif url.startswith('/') and os.path.exists(url):
+        local_path = url
+    
+    # If it's a local file, return it directly
+    if local_path:
+        if os.path.exists(local_path):
+            progress_callback(f"Using local file: {local_path}")
+            return local_path
+        else:
+            raise Exception(f"Local file path does not exist: {local_path}")
     
     session = None
     try:

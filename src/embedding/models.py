@@ -2,6 +2,7 @@
 Model loading for ImageBind, Whisper, and BLIP
 """
 import os
+import sys
 import torch
 import logging
 import warnings
@@ -42,16 +43,60 @@ try:
         logger.addHandler(null_handler)
         logger.propagate = False
     
-    # Patch logging to handle closed file errors gracefully
+    # Patch ALL StreamHandler instances to handle closed file errors gracefully
+    # This must be done before any handlers are created
     original_emit = logging.StreamHandler.emit
     def safe_emit(self, record):
         try:
+            # Check if stream exists and is not closed
+            if not hasattr(self, 'stream') or self.stream is None:
+                return
+            if hasattr(self.stream, 'closed') and self.stream.closed:
+                return
+            # Check if stream is writable
+            if hasattr(self.stream, 'writable'):
+                try:
+                    if not self.stream.writable():
+                        return
+                except (ValueError, OSError, AttributeError):
+                    return
+            # Try to write, catch any I/O errors
             original_emit(self, record)
-        except (ValueError, OSError) as e:
-            # Ignore "I/O operation on closed file" errors
-            if "closed file" not in str(e).lower():
-                raise
+        except (ValueError, OSError, AttributeError, RuntimeError) as e:
+            # Ignore all I/O and stream-related errors - logging failures shouldn't crash the app
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in [
+                "closed file", "i/o operation", "bad file descriptor", 
+                "broken pipe", "connection", "stream"
+            ]):
+                return  # Silently ignore
+            # For any other errors, also ignore to prevent crashes
+            return
     logging.StreamHandler.emit = safe_emit
+    
+    # Patch existing handlers in root logger and all loggers to use safe_emit
+    # This ensures handlers created before the patch are also protected
+    import types
+    def patch_existing_handlers():
+        """Patch all existing StreamHandlers to use safe_emit"""
+        for logger_name in ['', 'imagebind', 'imagebind.data', 'imagebind.models']:
+            logger = logging.getLogger(logger_name)
+            for handler in logger.handlers:
+                if isinstance(handler, logging.StreamHandler):
+                    # Create a bound method that uses safe_emit
+                    def make_safe_emit(h):
+                        def safe_emit_bound(record):
+                            return safe_emit(h, record)
+                        return safe_emit_bound
+                    handler.emit = make_safe_emit(handler)
+    
+    patch_existing_handlers()
+    
+    # Also ensure ImageBind loggers don't propagate to root logger
+    # This prevents root logger handlers from trying to write to closed streams
+    for logger_name in ['imagebind', 'imagebind.data', 'imagebind.models']:
+        logger = logging.getLogger(logger_name)
+        logger.propagate = False
 except Exception:
     pass
 
