@@ -40,4 +40,4 @@ typing-extensions>=4.5.0
 setuptools>=69.5.1
 
 # Optional: Whisper (not used in pipeline but may be needed for other parts)
-# openai-whisper>=20230918
+openai-whisper>=20230918
