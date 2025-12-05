@@ -3,7 +3,7 @@ Analysis functionality for video content
 Supports query intent detection and LLM-based analysis
 """
 import json
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 from functools import wraps
 from time import sleep
 
@@ -11,6 +11,95 @@ try:
     import openai
 except ImportError:
     openai = None
+
+
+def get_video_data_from_pinecone(
+    video_doc_id: str,
+    text_index,
+    max_scenes: int = 1000
+) -> Tuple[Optional[List[Dict]], Optional[float]]:
+    """
+    Fetches transcript segments and video duration from Pinecone for a given video.
+    
+    Args:
+        video_doc_id: Video document ID (attachment_id)
+        text_index: Pinecone text index
+        max_scenes: Maximum number of scenes to fetch (default: 1000)
+        
+    Returns:
+        Tuple of (transcript_segments, video_duration) or (None, None) if not found
+        transcript_segments: List of dicts with 'start', 'end', 'text' keys
+        video_duration: Video duration in seconds (max end_time from all scenes)
+    """
+    if not text_index or not video_doc_id:
+        return None, None
+    
+    try:
+        # Query Pinecone to get all scenes for this video
+        # Use a dummy query vector (we're filtering by metadata, not searching)
+        # We'll fetch a large number of results to get all scenes
+        filter_dict = {"video_doc_id": str(video_doc_id)}
+        
+        # Create a dummy zero vector for querying (we only care about metadata filter)
+        # Get dimension from index stats
+        try:
+            stats = text_index.describe_index_stats()
+            dimension = stats.dimension if hasattr(stats, 'dimension') else 1024
+        except:
+            dimension = 1024  # Default ImageBind text embedding dimension
+        
+        dummy_vector = [0.0] * dimension
+        
+        # Query with filter to get all scenes for this video
+        results = text_index.query(
+            vector=dummy_vector,
+            top_k=max_scenes,
+            include_metadata=True,
+            filter=filter_dict
+        )
+        
+        if not results or not hasattr(results, 'matches') or not results.matches:
+            print(f"No scenes found for video_doc_id: {video_doc_id}")
+            return None, None
+        
+        # Extract transcript segments from scene metadata
+        transcript_segments = []
+        max_end_time = 0.0
+        
+        for match in results.matches:
+            meta = match.metadata
+            start_time = meta.get('start_time', 0.0)
+            end_time = meta.get('end_time', 0.0)
+            transcript_text = meta.get('transcript', '').strip()
+            
+            # Update max end time (video duration)
+            if end_time > max_end_time:
+                max_end_time = end_time
+            
+            # Only add segments with transcript text
+            if transcript_text:
+                transcript_segments.append({
+                    'start': start_time,
+                    'end': end_time,
+                    'text': transcript_text
+                })
+        
+        # Sort segments by start time
+        transcript_segments.sort(key=lambda x: x['start'])
+        
+        # If we got max_scenes results, video might be longer - estimate duration
+        if len(results.matches) >= max_scenes:
+            print(f"Warning: Retrieved maximum scenes ({max_scenes}). Video duration may be underestimated.")
+        
+        video_duration = max_end_time if max_end_time > 0 else None
+        
+        return transcript_segments, video_duration
+        
+    except Exception as e:
+        print(f"Error fetching video data from Pinecone: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 
 def retry_on_network_error(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
@@ -245,6 +334,46 @@ def analyze_video(
             context = "\n".join(unique_clips_context.values())
             if context:
                 return get_llm_analysis_json(prompt, context, video_duration, openai_client)
+        
+        # If no search results provided, try to perform a search if we have the necessary components
+        if not search_results and text_index and embedding_model and video_doc_id:
+            try:
+                from src.retrieval.search import perform_text_search
+                # Perform a text search using the prompt as the query
+                # Filter by video_doc_id to only get results from this video
+                filter_dict = {"video_doc_id": str(video_doc_id)}
+                search_results = perform_text_search(
+                    query_text=prompt,
+                    video_index=None,  # Not needed for text search
+                    audio_index=None,  # Not needed for text search
+                    text_index=text_index,
+                    desc_index=desc_index,
+                    embedding_model=embedding_model,
+                    caption_processor=None,  # Not needed for text search
+                    caption_model=None,  # Not needed for text search
+                    device=device,
+                    top_k=20,  # Get more results for better context
+                    filter_dict=filter_dict
+                )
+                
+                # Use the search results
+                if search_results:
+                    unique_clips_context = {}
+                    for match in sorted(search_results, key=lambda x: x.score, reverse=True):
+                        meta = match.metadata
+                        start = meta.get('start_time', 0.0)
+                        end = meta.get('end_time', 0.0)
+                        text = meta.get("transcript") or meta.get("description", "")
+                        if text:
+                            if int(start) not in unique_clips_context:
+                                unique_clips_context[int(start)] = f"[{start:.1f}-{end:.1f}s] {text}"
+                    
+                    context = "\n".join(unique_clips_context.values())
+                    if context:
+                        return get_llm_analysis_json(prompt, context, video_duration, openai_client)
+            except Exception as e:
+                print(f"Error performing search for analysis: {e}")
+                # Fall through to transcript fallback
         
         # If no search results but we have transcript, fallback to full transcript
         if transcript_segments:

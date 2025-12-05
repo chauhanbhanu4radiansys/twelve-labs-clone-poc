@@ -34,7 +34,13 @@ def merge_overlapping_clips(search_results: List[Any], gap_seconds: int = 3) -> 
             metadata = res.get('metadata', res)
             score = res.get('score', 0.0)
         
-        video_id = metadata.get("video_doc_id") if isinstance(metadata, dict) else getattr(metadata, 'video_doc_id', None)
+        # Handle both video_id and video_doc_id (for compatibility)
+        video_id = None
+        if isinstance(metadata, dict):
+            video_id = metadata.get("video_doc_id") or metadata.get("video_id")
+        else:
+            video_id = getattr(metadata, 'video_doc_id', None) or getattr(metadata, 'video_id', None)
+        
         if video_id not in results_by_video:
             results_by_video[video_id] = []
         results_by_video[video_id].append(res)

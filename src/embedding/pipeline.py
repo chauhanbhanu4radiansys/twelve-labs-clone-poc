@@ -83,15 +83,20 @@ def process_batch(
     pil_images = [item['pil_image'] for item in batch_data]
     audio_paths = [item['audio_path'] for item in batch_data]
     transcripts = [item['transcript'] for item in batch_data]
+    
+    # Filter out empty transcripts (but keep placeholders for indexing)
+    # Empty transcripts will still be stored in metadata but won't generate embeddings
+    transcripts_for_embedding = [t if t and t.strip() else "" for t in transcripts]
 
     # Batch generate descriptions
     descriptions = generate_scene_descriptions(pil_images, caption_processor, caption_model, device)
 
     # Batch generate embeddings for all modalities
+    # Note: Empty strings in transcripts_for_embedding are handled by ImageBind (returns empty tensor)
     image_embeddings, audio_embeddings, text_embeddings = get_batch_embeddings(
         pil_images=pil_images, 
         audio_paths=audio_paths, 
-        texts=transcripts,
+        texts=transcripts_for_embedding,
         device=device, 
         model=embedding_model
     )

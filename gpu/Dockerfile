@@ -114,21 +114,49 @@ RUN echo "Pre-downloading ImageBind model (this may take several minutes)..." &&
     echo "✓ ImageBind model pre-downloaded successfully"
 
 # Pre-download BLIP captioning model (~2GB) to HuggingFace cache
+# Explicitly download all files including safetensors/tensors to avoid runtime downloads
 RUN echo "Pre-downloading BLIP captioning model (this may take several minutes)..." && \
-    python3.11 -c "import os; \
-    os.environ['HF_HOME'] = '/model_cache/huggingface'; \
-    os.environ['TRANSFORMERS_CACHE'] = '/model_cache/transformers'; \
-    from transformers import BlipProcessor, BlipForConditionalGeneration; \
-    print('Downloading BLIP processor...'); \
-    processor = BlipProcessor.from_pretrained('Salesforce/blip-image-captioning-large', cache_dir='/model_cache/huggingface'); \
-    print('Downloading BLIP model...'); \
-    model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-large', cache_dir='/model_cache/huggingface'); \
-    print('✓ BLIP model downloaded and cached'); \
-    cache_size = sum(os.path.getsize(os.path.join(dirpath, filename)) \
-                     for dirpath, dirnames, filenames in os.walk('/model_cache/huggingface') \
-                     for filename in filenames) / (1024**3); \
-    print(f'BLIP cache size: {cache_size:.2f} GB')" && \
-    echo "✓ BLIP model pre-downloaded successfully" && \
+    python3.11 << 'PYEOF'
+import os
+os.environ['HF_HOME'] = '/model_cache/huggingface'
+os.environ['TRANSFORMERS_CACHE'] = '/model_cache/transformers'
+os.environ['HF_HUB_CACHE'] = '/model_cache/huggingface'
+
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from huggingface_hub import snapshot_download
+
+print('Downloading BLIP model files (including safetensors/tensors)...')
+# Explicitly download all files including safetensors/tensors
+snapshot_download('Salesforce/blip-image-captioning-large',
+                  cache_dir='/model_cache/huggingface',
+                  local_files_only=False)
+
+print('Loading BLIP processor...')
+processor = BlipProcessor.from_pretrained('Salesforce/blip-image-captioning-large',
+                                          cache_dir='/model_cache/huggingface')
+
+print('Loading BLIP model...')
+model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-large',
+                                                      cache_dir='/model_cache/huggingface')
+
+print('✓ BLIP model downloaded and cached')
+
+cache_size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                 for dirpath, dirnames, filenames in os.walk('/model_cache/huggingface')
+                 for filename in filenames) / (1024**3)
+print(f'BLIP cache size: {cache_size:.2f} GB')
+
+# Verify safetensors and tensor files exist
+import glob
+safetensors_files = glob.glob('/model_cache/huggingface/**/*.safetensors', recursive=True)
+bin_files = glob.glob('/model_cache/huggingface/**/*.bin', recursive=True)
+print(f'Found {len(safetensors_files)} safetensors files')
+print(f'Found {len(bin_files)} bin/tensor files')
+
+if len(safetensors_files) == 0 and len(bin_files) == 0:
+    raise Exception('No model tensor files found!')
+PYEOF
+RUN echo "✓ BLIP model pre-downloaded successfully" && \
     echo "" && \
     echo "==========================================" && \
     echo "All models pre-downloaded successfully!" && \

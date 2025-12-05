@@ -133,7 +133,8 @@ import json
 import re
 from functools import wraps
 from time import sleep
-from transformers import BlipProcessor, BlipForConditionalGeneration
+# Defer BLIP imports until needed (fixes import timing issues in Streamlit)
+# from transformers import BlipProcessor, BlipForConditionalGeneration
 from pydub import AudioSegment
 
 # --- Constants ---
@@ -205,56 +206,110 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Configuration Loading from Streamlit Secrets ---
+# --- Configuration Loading ---
+# HARDCODED VALUES: Replace the values below with your actual credentials
+# WARNING: Hardcoding credentials in source code is a security risk. 
+# For production, use environment variables or Streamlit secrets instead.
+
 def load_config():
-    """Loads configuration from Streamlit's secrets."""
+    """Loads configuration from hardcoded values or Streamlit secrets (if available)."""
     config = {}
+    
+    # ============================================
+    # HARDCODED CONFIGURATION VALUES
+    # ============================================
+    # Replace these values with your actual credentials:
+    
+    # MinIO/S3 Configuration
+    MINIO_ENDPOINT = "localhost:9000"  # e.g., "localhost:9000" or "s3.amazonaws.com"
+    MINIO_ACCESS_KEY = "YOUR_MINIO_ACCESS_KEY"  # Your MinIO access key
+    MINIO_SECRET_KEY = "YOUR_MINIO_SECRET_KEY"  # Your MinIO secret key
+    MINIO_BUCKET_NAME = "videos"  # Bucket name for videos
+    MINIO_TRANSCRIPTS_BUCKET = "transcripts"  # Bucket name for transcripts
+    MINIO_SECURE = False  # Set to True if using HTTPS
+    
+    # MongoDB Configuration
+    MONGODB_URI = "mongodb://YOUR_MONGODB_USER:YOUR_MONGODB_PASSWORD@YOUR_MONGODB_HOST:27017/"  # e.g., "mongodb://localhost:27017/" or "mongodb://user:pass@host:27017/"
+    MONGODB_DATABASE = "YOUR_MONGODB_DATABASE"  # Database name
+    MONGODB_COLLECTION = "embed-uploads"  # Collection name
+    
+    # Pinecone Configuration
+    PINECONE_API_KEY = "YOUR_PINECONE_API_KEY"  # Your Pinecone API key
+    
+    # OpenAI Configuration (Optional - set to None if not using)
+    OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"  # e.g., "sk-..." or None to disable
+    
+    # ============================================
+    # END OF HARDCODED VALUES
+    # ============================================
+    
     try:
-        # MinIO Config
-        config["minio"] = {
-            "endpoint": st.secrets["minio"]["endpoint"],
-            "access_key": st.secrets["minio"]["access_key"],
-            "secret_key": st.secrets["minio"]["secret_key"],
-            "bucket_name": st.secrets["minio"]["bucket_name"],
-            "transcripts_bucket_name": st.secrets["minio"].get("transcripts_bucket_name", "transcripts"),
-            "secure": st.secrets["minio"].get("secure", False)
-        }
-        # MongoDB Config
-        config["mongodb"] = {
-            "uri": st.secrets["mongodb"]["uri"],
-            "database_name": st.secrets["mongodb"]["database_name"],
-            "collection_name": st.secrets["mongodb"]["collection_name"],
-        }
-        # Pinecone Config
-        config["pinecone"] = {
-            "api_key": st.secrets["pinecone"]["api_key"],
-            "video_index_name": "video-search",
-            "audio_index_name": "audio-search",
-            "text_index_name": "text-search",
-            "desc_index_name": "desc-search"
-        }
-        # OpenAI Config
+        # Try to load from Streamlit secrets first (if available)
+        # If secrets exist, they will override hardcoded values
+        use_secrets = False
         try:
-            if "openai" in st.secrets:
-                if "api_key" in st.secrets["openai"]:
-                    config["openai"] = {
-                        "api_key": st.secrets["openai"]["api_key"]
-                    }
-                else:
-                    print("Warning: OpenAI section found but 'api_key' key is missing")
-                    config["openai"] = None
+            if hasattr(st, 'secrets') and st.secrets:
+                use_secrets = True
+        except:
+            use_secrets = False
+        
+        if use_secrets:
+            # Load from Streamlit secrets
+            config["minio"] = {
+                "endpoint": st.secrets["minio"].get("endpoint", MINIO_ENDPOINT),
+                "access_key": st.secrets["minio"].get("access_key", MINIO_ACCESS_KEY),
+                "secret_key": st.secrets["minio"].get("secret_key", MINIO_SECRET_KEY),
+                "bucket_name": st.secrets["minio"].get("bucket_name", MINIO_BUCKET_NAME),
+                "transcripts_bucket_name": st.secrets["minio"].get("transcripts_bucket_name", MINIO_TRANSCRIPTS_BUCKET),
+                "secure": st.secrets["minio"].get("secure", MINIO_SECURE)
+            }
+            config["mongodb"] = {
+                "uri": st.secrets["mongodb"].get("uri", MONGODB_URI),
+                "database_name": st.secrets["mongodb"].get("database_name", MONGODB_DATABASE),
+                "collection_name": st.secrets["mongodb"].get("collection_name", MONGODB_COLLECTION),
+            }
+            config["pinecone"] = {
+                "api_key": st.secrets["pinecone"].get("api_key", PINECONE_API_KEY),
+                "video_index_name": "video-search",
+                "audio_index_name": "audio-search",
+                "text_index_name": "text-search",
+                "desc_index_name": "desc-search"
+            }
+            if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+                config["openai"] = {
+                    "api_key": st.secrets["openai"]["api_key"]
+                }
             else:
-                print("Warning: 'openai' section not found in st.secrets")
-                config["openai"] = None
-        except Exception as e:
-            print(f"Warning: Could not load OpenAI config: {e}")
-            import traceback
-            traceback.print_exc()
-            config["openai"] = None
+                config["openai"] = {"api_key": OPENAI_API_KEY} if OPENAI_API_KEY else None
+        else:
+            # Use hardcoded values
+            config["minio"] = {
+                "endpoint": MINIO_ENDPOINT,
+                "access_key": MINIO_ACCESS_KEY,
+                "secret_key": MINIO_SECRET_KEY,
+                "bucket_name": MINIO_BUCKET_NAME,
+                "transcripts_bucket_name": MINIO_TRANSCRIPTS_BUCKET,
+                "secure": MINIO_SECURE
+            }
+            config["mongodb"] = {
+                "uri": MONGODB_URI,
+                "database_name": MONGODB_DATABASE,
+                "collection_name": MONGODB_COLLECTION,
+            }
+            config["pinecone"] = {
+                "api_key": PINECONE_API_KEY,
+                "video_index_name": "video-search",
+                "audio_index_name": "audio-search",
+                "text_index_name": "text-search",
+                "desc_index_name": "desc-search"
+            }
+            config["openai"] = {"api_key": OPENAI_API_KEY} if OPENAI_API_KEY else None
 
         return config
-    except KeyError as e:
-        st.error(f"Configuration Error: Missing secret '{e.args[0]}'. Please check your secrets.toml file.")
+    except Exception as e:
+        st.error(f"Configuration Error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 config = load_config()
@@ -291,7 +346,8 @@ def init_minio_client(config):
             except ClientError as e:
                 if e.response['Error']['Code'] == '404':
                     s3_client.create_bucket(Bucket=bucket_name)
-                    st.toast(f"MinIO bucket '{bucket_name}' created.", icon="💾")
+                    # Note: Can't use st.toast() in cached function, using print instead
+                    print(f"MinIO bucket '{bucket_name}' created.")
                 else:
                     raise
         
@@ -299,21 +355,22 @@ def init_minio_client(config):
         check_and_create_bucket(config["minio"]["transcripts_bucket_name"])
         return s3_client
     except (NoCredentialsError, PartialCredentialsError):
-        st.error("MinIO connection failed: AWS credentials not found.")
+        # Note: Can't use st.error() in cached function, return None and handle error outside
+        print("MinIO connection failed: AWS credentials not found.")
         return None
     except ClientError as e:
         error_msg = str(e)
         if "network" in error_msg.lower() or "connection" in error_msg.lower() or "timeout" in error_msg.lower():
-            st.error(f"MinIO connection failed due to network error: {e}. Please check your connection and try again.")
+            print(f"MinIO connection failed due to network error: {e}. Please check your connection and try again.")
         else:
-            st.error(f"MinIO connection failed: {e}")
+            print(f"MinIO connection failed: {e}")
         return None
     except Exception as e:
         error_msg = str(e)
         if "network" in error_msg.lower() or "connection" in error_msg.lower():
-            st.error(f"MinIO connection failed due to network error: {e}. Please check your connection and try again.")
+            print(f"MinIO connection failed due to network error: {e}. Please check your connection and try again.")
         else:
-            st.error(f"MinIO connection failed: {e}")
+            print(f"MinIO connection failed: {e}")
         return None
 
 @st.cache_resource
@@ -328,10 +385,11 @@ def init_mongo_collection(config):
         videos_collection = db[config["mongodb"]["collection_name"]]
         return videos_collection
     except ConnectionFailure:
-        st.error("MongoDB connection failed. Check your URI and network access.")
+        # Note: Can't use st.error() in cached function, return None and handle error outside
+        print("MongoDB connection failed. Check your URI and network access.")
         return None
     except OperationFailure as e:
-        st.error(f"MongoDB authentication failed: {e.details.get('errmsg', '')}")
+        print(f"MongoDB authentication failed: {e.details.get('errmsg', '')}")
         return None
 
 @st.cache_resource
@@ -356,11 +414,12 @@ def init_pinecone_indexes(config):
             try:
                 index_list = pc.list_indexes().names()
                 if index_name not in index_list:
-                    st.error(f"Pinecone index '{index_name}' not found. Available indexes: {index_list}")
+                    # Note: Can't use st.error() in cached function, using print instead
+                    print(f"Pinecone index '{index_name}' not found. Available indexes: {index_list}")
                     return None
                 return pc.Index(index_name)
             except Exception as e:
-                st.error(f"Failed to connect to Pinecone index '{index_name}': {e}")
+                print(f"Failed to connect to Pinecone index '{index_name}': {e}")
                 raise
 
         video_index = connect_to_index(video_index_name)
@@ -372,19 +431,27 @@ def init_pinecone_indexes(config):
     except Exception as e:
         error_msg = str(e)
         if "network" in error_msg.lower() or "connection" in error_msg.lower() or "timeout" in error_msg.lower():
-            st.error(f"Pinecone connection failed due to network error: {e}. Please check your internet connection and try again.")
+            # Note: Can't use st.error() or st.expander() in cached function, using print instead
+            print(f"Pinecone connection failed due to network error: {e}. Please check your internet connection and try again.")
         else:
-            st.error(f"Pinecone connection failed: {e}")
+            print(f"Pinecone connection failed: {e}")
         import traceback
-        with st.expander("Error Details"):
-            st.code(traceback.format_exc())
+        traceback.print_exc()
         return None, None, None, None
 
 # Initialize clients if config is loaded
 if config:
     s3_client = init_minio_client(config)
+    if s3_client is None:
+        st.error("⚠️ Failed to initialize MinIO client. Please check your MinIO configuration and ensure MinIO is running.")
+    
     mongo_collection = init_mongo_collection(config)
+    if mongo_collection is None:
+        st.error("⚠️ Failed to initialize MongoDB client. Please check your MongoDB connection URI.")
+    
     video_pinecone_index, audio_pinecone_index, text_pinecone_index, desc_pinecone_index = init_pinecone_indexes(config)
+    if video_pinecone_index is None or audio_pinecone_index is None or text_pinecone_index is None or desc_pinecone_index is None:
+        st.error("⚠️ Failed to initialize Pinecone indexes. Please check your Pinecone API key and ensure indexes exist.")
     # Initialize OpenAI client if configured
     if config.get("openai") and config["openai"].get("api_key"):
         try:
@@ -537,9 +604,14 @@ whisper_model = load_whisper_model()
 def load_captioning_model():
     """Loads the BLIP image captioning model and processor."""
     try:
+        # Import here to avoid Streamlit import timing issues
+        from transformers import BlipProcessor, BlipForConditionalGeneration
         processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
         model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
         return processor, model
+    except ImportError as e:
+        st.error(f"Could not import BLIP models from transformers: {e}. Please ensure transformers>=4.35.2 is installed.")
+        return None, None
     except Exception as e:
         st.error(f"Could not load captioning model: {e}")
         return None, None
@@ -2210,11 +2282,76 @@ with tab2:
         if sorted_results:
             merged_clips = merge_overlapping_clips(sorted_results)
             render_search_results_grid(merged_clips, original_count=len(sorted_results))
+            
+            # Print JSON response data to console (matching handler.py format)
+            # Convert results to JSON format matching handler.py
+            json_results = []
+            for match in merged_clips:
+                meta = match.metadata
+                score = match.score
+                
+                # Categorize score
+                if score >= 0.5:
+                    category = "HIGH"
+                elif score >= 0.3:
+                    category = "MEDIUM"
+                else:
+                    category = "LOW"
+                
+                # Format timestamps
+                start_time = meta.get('start_time', 0.0)
+                end_time = meta.get('end_time', 0.0)
+                start_timestamp = time.strftime('%H:%M:%S', time.gmtime(start_time)) if start_time else "00:00:00"
+                end_timestamp = time.strftime('%H:%M:%S', time.gmtime(end_time)) if end_time else "00:00:00"
+                
+                result_obj = {
+                    'score': round(score, 3),
+                    'category': category,
+                    'video_name': meta.get('video_name', 'Unknown'),
+                    'video_id': meta.get('video_id', meta.get('video_doc_id', '')),
+                    'video_doc_id': meta.get('video_doc_id', meta.get('video_id', '')),  # Include both for compatibility
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'start_timestamp': start_timestamp,
+                    'end_timestamp': end_timestamp,
+                    'time_range': f"{start_timestamp} - {end_timestamp}",
+                    'transcript': meta.get('transcript', ''),
+                    'description': meta.get('description', ''),
+                    'source': meta.get('source', 'N/A'),
+                    'scene_uuid': meta.get('scene_uuid', ''),
+                    'scene_index': meta.get('scene_index', -1),
+                    'metadata': meta
+                }
+                json_results.append(result_obj)
+            
+            # Build response matching handler.py format
+            # Determine search type
+            if uploaded_search_file:
+                if 'image' in uploaded_search_file.type:
+                    search_type_display = 'image'
+                else:
+                    search_type_display = 'audio'
+            else:
+                search_type_display = 'text'
+            
+            response_data = {
+                'status': 'success',
+                'search_type': search_type_display,
+                'results_count': len(json_results),
+                'original_results_count': len(sorted_results),
+                'scene_merging': True,
+                'merge_gap_seconds': 3,
+                'results': json_results
+            }
+            
+            # Print to console
+            print("\n" + "=" * 80)
+            print("SEARCH RESULTS JSON (matching handler.py format)")
+            print("=" * 80)
+            print(json.dumps(response_data, indent=2))
+            print("=" * 80 + "\n")
         else:
             st.warning("No matching scenes found.")
-
-        # st.success(f"Found {len(sorted_results)} relevant results.")
-        # st.info(f"Found {len(sorted_results)} relevant results (merged from {original_count} results).")
 
         st.markdown("---")
 

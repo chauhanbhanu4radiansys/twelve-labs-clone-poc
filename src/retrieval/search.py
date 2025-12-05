@@ -48,12 +48,17 @@ def perform_text_search(
     """
     Performs a text-based search across all modalities.
     
+    IMPORTANT: This function queries the text_index which contains embeddings from transcript text.
+    For queries asking about what speakers say (e.g., "where does a speaker say X"),
+    the text_index will provide the most relevant matches as it contains transcript embeddings.
+    The scoring function prioritizes text index results when they have high relevance scores.
+    
     Args:
-        query_text: Text query string
-        video_index: Pinecone video index
-        audio_index: Pinecone audio index
-        text_index: Pinecone text index
-        desc_index: Pinecone description index
+        query_text: Text query string (e.g., "where does a speaker say X")
+        video_index: Pinecone video index (visual embeddings)
+        audio_index: Pinecone audio index (audio embeddings)
+        text_index: Pinecone text index (transcript text embeddings) - KEY for transcript queries
+        desc_index: Pinecone description index (scene description embeddings)
         embedding_model: ImageBind model for generating embeddings
         caption_processor: BLIP processor (not used for text search)
         caption_model: BLIP model (not used for text search)
@@ -63,8 +68,9 @@ def perform_text_search(
         
     Returns:
         List of search results sorted by score (descending)
+        Results from text_index are prioritized when they have high relevance (score >= 0.65)
     """
-    # Generate text embedding
+    # Generate text embedding from query
     _, _, query_embedding_tensor = get_batch_embeddings(
         pil_images=[],
         audio_paths=[],
@@ -78,11 +84,12 @@ def perform_text_search(
     
     query_vector = query_embedding_tensor[0].cpu().numpy().tolist()
     
-    # Prepare search tasks for all indexes
+    # Query all indexes in parallel with the same text embedding
+    # text_index contains transcript embeddings, so it's crucial for transcript-related queries
     search_tasks = {
         video_index: query_vector,
         audio_index: query_vector,
-        text_index: query_vector,
+        text_index: query_vector,  # This index contains transcript text embeddings
         desc_index: query_vector
     }
     
@@ -131,14 +138,15 @@ def perform_text_search(
         if source_name and results:
             process_results(results, source_name)
     
-    # Compute final scores and create result list
+    # Compute final scores and create result list (matching app-code-ref.py logic exactly)
     final_results = []
     for item in merged_results.values():
         best_match = item['match']
         scores_dict = item['scores']
         final_score = compute_final_score(scores_dict)
         best_match.score = final_score
-        source_details = [source for source in sorted(scores_dict.keys())]
+        # Match app-code-ref.py: sort sources alphabetically (same as sorted(scores_dict.items()) which sorts by key)
+        source_details = [source for source, score in sorted(scores_dict.items())]
         best_match.metadata['source'] = ', '.join(source_details)
         final_results.append(best_match)
     
@@ -173,14 +181,20 @@ def perform_image_search(
     Returns:
         List of search results sorted by score (descending)
     """
+    print(f"[DEBUG] Starting image search with image_path: {image_path}")
+    
     # Load image
     try:
         pil_image = Image.open(image_path)
+        print(f"[DEBUG] Image loaded successfully. Size: {pil_image.size}, Mode: {pil_image.mode}")
     except Exception as e:
         print(f"Error loading image: {e}")
+        import traceback
+        traceback.print_exc()
         return []
     
     # Generate image embedding
+    print(f"[DEBUG] Generating image embedding...")
     query_embedding_tensor, _, _ = get_batch_embeddings(
         pil_images=[pil_image],
         audio_paths=[],
@@ -189,13 +203,20 @@ def perform_image_search(
         model=embedding_model
     )
     
+    print(f"[DEBUG] Image embedding generated. Shape: {query_embedding_tensor.shape if query_embedding_tensor.nelement() > 0 else 'empty'}")
+    
     search_tasks = {}
     if query_embedding_tensor.nelement() > 0:
         search_tasks[video_index] = query_embedding_tensor[0].cpu().numpy().tolist()
+        print(f"[DEBUG] Added video_index to search_tasks. Vector length: {len(search_tasks[video_index])}")
+    else:
+        print(f"[DEBUG] WARNING: Image embedding is empty!")
     
     # Generate description and its embedding
     if caption_processor and caption_model:
+        print(f"[DEBUG] Generating description...")
         desc = generate_scene_descriptions([pil_image], caption_processor, caption_model, device)[0]
+        print(f"[DEBUG] Description generated: {desc[:100] if desc else 'EMPTY'}...")
         if desc:
             _, _, desc_embedding_tensor = get_batch_embeddings(
                 pil_images=[],
@@ -206,11 +227,22 @@ def perform_image_search(
             )
             if desc_embedding_tensor.nelement() > 0:
                 search_tasks[desc_index] = desc_embedding_tensor[0].cpu().numpy().tolist()
+                print(f"[DEBUG] Added desc_index to search_tasks. Vector length: {len(search_tasks[desc_index])}")
+            else:
+                print(f"[DEBUG] WARNING: Description embedding is empty!")
+        else:
+            print(f"[DEBUG] WARNING: Description is empty!")
+    else:
+        print(f"[DEBUG] WARNING: caption_processor or caption_model is None!")
+    
+    print(f"[DEBUG] Total search_tasks: {len(search_tasks)}")
     
     if not search_tasks:
+        print(f"[DEBUG] ERROR: No search_tasks created! Returning empty results.")
         return []
     
     # Query indexes in parallel
+    print(f"[DEBUG] Querying Pinecone indexes...")
     results_map = {}
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_index = {
@@ -220,10 +252,19 @@ def perform_image_search(
         for future in concurrent.futures.as_completed(future_to_index):
             index = future_to_index[future]
             try:
-                results_map[index] = future.result(timeout=30)
+                results = future.result(timeout=30)
+                results_map[index] = results
+                if results and hasattr(results, 'matches'):
+                    print(f"[DEBUG] Index {index} returned {len(results.matches)} matches")
+                else:
+                    print(f"[DEBUG] Index {index} returned no matches or invalid result")
             except Exception as e:
                 print(f"Error querying index: {e}")
+                import traceback
+                traceback.print_exc()
                 results_map[index] = None
+    
+    print(f"[DEBUG] Results map has {len(results_map)} entries")
     
     # Process and merge results
     merged_results = {}
@@ -235,10 +276,13 @@ def perform_image_search(
     
     def process_results(results, source_name):
         if not results or not hasattr(results, 'matches'):
+            print(f"[DEBUG] Skipping results for {source_name}: no matches or invalid")
             return
+        print(f"[DEBUG] Processing {len(results.matches)} matches from {source_name}")
         for match in results.matches:
             scene_uuid = match.metadata.get("scene_uuid")
             if not scene_uuid:
+                print(f"[DEBUG] WARNING: Match missing scene_uuid, skipping")
                 continue
             
             if scene_uuid not in merged_results:
@@ -253,16 +297,21 @@ def perform_image_search(
         if source_name and results:
             process_results(results, source_name)
     
-    # Compute final scores
+    print(f"[DEBUG] Merged results: {len(merged_results)} unique scenes")
+    
+    # Compute final scores (matching app-code-ref.py logic exactly)
     final_results = []
     for item in merged_results.values():
         best_match = item['match']
         scores_dict = item['scores']
         final_score = compute_final_score(scores_dict)
         best_match.score = final_score
-        source_details = [source for source in sorted(scores_dict.keys())]
+        # Match app-code-ref.py: sort sources alphabetically
+        source_details = [source for source, score in sorted(scores_dict.items())]
         best_match.metadata['source'] = ', '.join(source_details)
         final_results.append(best_match)
+    
+    print(f"[DEBUG] Final results count: {len(final_results)}")
     
     return sorted(final_results, key=lambda x: x.score, reverse=True)
 
@@ -372,21 +421,23 @@ def perform_audio_search(
                     if match.score > merged_results[scene_uuid]['match'].score:
                         merged_results[scene_uuid]['match'] = match
     
-    # Compute final scores using audio-specific scoring
+    # Compute final scores using audio-specific scoring (matching app-code-ref.py logic)
     final_results = []
     for item in merged_results.values():
         best_match = item['match']
         scores_dict = item['scores']
         best_match.score = compute_audio_search_score(scores_dict)
+        # Set source metadata (matching app-code-ref.py format)
+        source_details = [source for source, score in sorted(scores_dict.items())]
+        best_match.metadata['source'] = ', '.join(source_details)
         final_results.append(best_match)
     
     return sorted(final_results, key=lambda x: x.score, reverse=True)
 
 
 def search_videos(
-    query: Optional[str] = None,
-    image_path: Optional[str] = None,
-    audio_path: Optional[str] = None,
+    search_type: str,
+    query: str = None,
     video_index=None,
     audio_index=None,
     text_index=None,
@@ -399,15 +450,16 @@ def search_videos(
     top_k: int = 8,
     filter_dict: Optional[Dict] = None,
     merge_clips: bool = True,
-    gap_seconds: int = 3
+    gap_seconds: int = 3,
+    **kwargs  # For backward compatibility with 'search_query'
 ) -> List[Any]:
     """
     Unified search function that handles text, image, or audio queries.
     
     Args:
-        query: Text query string (optional)
-        image_path: Path to image file (optional)
-        audio_path: Path to audio file (optional)
+        search_type: Type of search - 'text', 'image', or 'audio'
+        query: The search query - text string for text search, URL for image/audio search (preferred)
+        **kwargs: For backward compatibility, accepts 'search_query' as alternative to 'query'
         video_index: Pinecone video index
         audio_index: Pinecone audio index
         text_index: Pinecone text index
@@ -425,50 +477,156 @@ def search_videos(
     Returns:
         List of search results, optionally merged
     """
+    import tempfile
+    import requests
+    
+    # Support both 'query' and 'search_query' for backward compatibility
+    if query is None:
+        query = kwargs.get('search_query')
+    if query is None:
+        raise ValueError("Missing required parameter: query (or search_query for backward compatibility)")
+    
     results = []
+    temp_file_path = None
     
-    # Priority: audio > image > text
-    if audio_path:
-        results = perform_audio_search(
-            audio_path=audio_path,
-            audio_index=audio_index,
-            text_index=text_index,
-            embedding_model=embedding_model,
-            whisper_model=whisper_model,
-            device=device,
-            top_k=top_k,
-            filter_dict=filter_dict
-        )
-    elif image_path:
-        results = perform_image_search(
-            image_path=image_path,
-            video_index=video_index,
-            desc_index=desc_index,
-            embedding_model=embedding_model,
-            caption_processor=caption_processor,
-            caption_model=caption_model,
-            device=device,
-            top_k=top_k,
-            filter_dict=filter_dict
-        )
-    elif query:
-        results = perform_text_search(
-            query_text=query,
-            video_index=video_index,
-            audio_index=audio_index,
-            text_index=text_index,
-            desc_index=desc_index,
-            embedding_model=embedding_model,
-            caption_processor=caption_processor,
-            caption_model=caption_model,
-            device=device,
-            top_k=top_k,
-            filter_dict=filter_dict
-        )
-    
-    # Merge overlapping clips if requested
-    if merge_clips and results:
-        results = merge_overlapping_clips(results, gap_seconds=gap_seconds)
+    try:
+        if search_type == 'audio':
+            # Handle both URLs (S3 pre-signed URLs, HTTP/HTTPS) and local file paths
+            if query.startswith('http://') or query.startswith('https://'):
+                # Download audio from URL (supports S3 pre-signed URLs and regular HTTP/HTTPS URLs)
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav', delete_on_close=False)
+                temp_file_path = temp_file.name
+                temp_file.close()
+                
+                # Download with streaming for large files (better for S3)
+                # Use longer timeout for S3 pre-signed URLs which may be slower
+                try:
+                    print(f"Downloading audio from URL: {query[:100]}...")
+                    response = requests.get(query, timeout=120, stream=True)
+                    response.raise_for_status()
+                    
+                    # Stream download for better memory efficiency (important for large S3 files)
+                    with open(temp_file_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    print(f"Audio downloaded successfully to: {temp_file_path}")
+                    audio_path = temp_file_path
+                except requests.exceptions.RequestException as e:
+                    print(f"Error downloading audio from URL: {e}")
+                    # Clean up temp file if download failed
+                    if os.path.exists(temp_file_path):
+                        try:
+                            os.remove(temp_file_path)
+                        except OSError:
+                            pass
+                    raise ValueError(f"Failed to download audio from URL: {str(e)}")
+            else:
+                # Local file path (for testing or mounted files)
+                if not os.path.exists(query):
+                    raise FileNotFoundError(f"Audio file not found: {query}")
+                audio_path = query
+            
+            results = perform_audio_search(
+                audio_path=audio_path,
+                audio_index=audio_index,
+                text_index=text_index,
+                embedding_model=embedding_model,
+                whisper_model=whisper_model,
+                device=device,
+                top_k=top_k,
+                filter_dict=filter_dict
+            )
+            
+        elif search_type == 'image':
+            # Handle both URLs (S3 pre-signed URLs, HTTP/HTTPS) and local file paths
+            if query.startswith('http://') or query.startswith('https://'):
+                # Download image from URL (supports S3 pre-signed URLs and regular HTTP/HTTPS URLs)
+                # Determine file extension from URL (handle query parameters in S3 URLs)
+                url_path = query.split('?')[0]
+                ext = os.path.splitext(url_path)[1]
+                # Default to .png if extension not found
+                if not ext or ext == '':
+                    ext = '.png'
+                
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext, delete_on_close=False)
+                temp_file_path = temp_file.name
+                temp_file.close()
+                
+                # Download with streaming for large files (better for S3)
+                # Use longer timeout for S3 pre-signed URLs which may be slower
+                try:
+                    print(f"Downloading image from URL: {query[:100]}...")
+                    response = requests.get(query, timeout=120, stream=True)
+                    response.raise_for_status()
+                    
+                    # Stream download for better memory efficiency (important for large S3 files)
+                    with open(temp_file_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    print(f"Image downloaded successfully to: {temp_file_path}")
+                    image_path = temp_file_path
+                except requests.exceptions.RequestException as e:
+                    print(f"Error downloading image from URL: {e}")
+                    # Clean up temp file if download failed
+                    if os.path.exists(temp_file_path):
+                        try:
+                            os.remove(temp_file_path)
+                        except OSError:
+                            pass
+                    raise ValueError(f"Failed to download image from URL: {str(e)}")
+            else:
+                # Local file path (for testing or mounted files)
+                if not os.path.exists(query):
+                    raise FileNotFoundError(f"Image file not found: {query}")
+                image_path = query
+            
+            results = perform_image_search(
+                image_path=image_path,
+                video_index=video_index,
+                desc_index=desc_index,
+                embedding_model=embedding_model,
+                caption_processor=caption_processor,
+                caption_model=caption_model,
+                device=device,
+                top_k=top_k,
+                filter_dict=filter_dict
+            )
+            
+        elif search_type == 'text':
+            results = perform_text_search(
+                query_text=query,
+                video_index=video_index,
+                audio_index=audio_index,
+                text_index=text_index,
+                desc_index=desc_index,
+                embedding_model=embedding_model,
+                caption_processor=caption_processor,
+                caption_model=caption_model,
+                device=device,
+                top_k=top_k,
+                filter_dict=filter_dict
+            )
+        else:
+            raise ValueError(f"Invalid search_type: {search_type}. Must be 'text', 'image', or 'audio'.")
+        
+        # Merge overlapping clips if requested
+        if merge_clips and results:
+            results = merge_overlapping_clips(results, gap_seconds=gap_seconds)
+        
+    finally:
+        # Clean up temporary file if created (for both image and audio downloads from URLs)
+        # This ensures cleanup even if an error occurs during processing
+        # Important for production S3 pre-signed URLs to prevent disk space issues
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"Cleaned up temporary file: {temp_file_path}")
+            except OSError as e:
+                print(f"Warning: Could not clean up temporary file {temp_file_path}: {e}")
     
     return results
 

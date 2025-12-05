@@ -243,174 +243,465 @@ def is_2k_or_higher(width, height):
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     """
-    RunPod serverless handler for video search embeddings processing.
+    RunPod serverless handler for video search operations.
     
-    Expected job format:
+    Supports the following task types:
+    - 'embedding' (default): Process video and generate embeddings
+    - 'search': Search across indexed videos
+    - 'analyse' or 'analyze': Analyze video content using LLM
+    
+    Expected job format for 'embedding':
     {
         "input": {
-            "videoPathURL": "https://...",  # Pre-signed S3 URL to video file
-            "transcriptPathURL": "https://...",  # Pre-signed S3 URL to transcript JSON file
-            "video_name": "video_name",  # Name of the video
-            "video_id": "optional_video_id",  # Optional, will be auto-generated if None
-            "id": "job_id",  # Job ID for notifications
-            "tenant": "tenant_id",  # Tenant ID for notifications
-            "snsTopicArn": "arn:aws:sns:...",  # SNS topic ARN for notifications
-            "duration": 10.0,  # Optional: video duration in seconds
-            "startTime": 0.0  # Optional: start time in seconds
+            "task_type": "embedding",  # Optional, defaults to 'embedding'
+            "videoPathURL": "https://...",
+            "transcriptPathURL": "https://...",
+            "video_name": "video_name",
+            "video_id": "optional_video_id",
+            "id": "job_id",
+            "tenant": "tenant_id",
+            "snsTopicArn": "arn:aws:sns:...",
+            "duration": 10.0,  # Optional
+            "startTime": 0.0  # Optional
+        }
+    }
+    
+    Expected job format for 'search':
+    {
+        "input": {
+            "task_type": "search",
+            "search_type": "text" | "image" | "audio",
+            "query": "text query or URL",
+            "top_k": 8,  # Optional, default 8
+            "filter": {"video_name": "..."}  # Optional metadata filter
+        }
+    }
+    
+    Expected job format for 'analyse':
+    {
+        "input": {
+            "task_type": "analyse",
+            "attachment_id": "video_doc_id",
+            "query": "your analysis prompt"
         }
     }
     """
     try:
-        # Extract input from job
         input_data = job.get('input', {})
-        videoPathURL = input_data.get('videoPathURL')
-        transcriptPathURL = input_data.get('transcriptPathURL')
-        video_name = input_data.get('video_name')
-        video_id = input_data.get('video_id')
-        job_id = input_data.get('id')
-        tenant = input_data.get('tenant')
-        sns_topic_arn = input_data.get('snsTopicArn')
-        duration = input_data.get('duration', None)
-        startTime = input_data.get('startTime', None)
+        task_type = input_data.get('task_type', 'embedding')
         
-        # Validate required parameters
-        if not videoPathURL:
-            raise ValueError("Missing required parameter: videoPathURL")
-        if not transcriptPathURL:
-            raise ValueError("Missing required parameter: transcriptPathURL")
-        if not video_name:
-            raise ValueError("Missing required parameter: video_name")
-        
-        print("=" * 80)
-        print("Starting Video Search Embeddings Processing")
-        print("=" * 80)
-        print(f"Video URL: {videoPathURL[:100]}...")
-        print(f"Transcript URL: {transcriptPathURL[:100]}...")
-        print(f"Video Name: {video_name}")
-        print(f"Video ID: {video_id or 'auto-generated'}")
-        print(f"Job ID: {job_id}")
-        print("=" * 80)
-        
-        # Set up temporary file paths in /tmp
-        local_video_path = '/tmp/input_video.mp4'
-        downloaded_video_path = None
-        
-        # Download video if range is specified (for partial video processing)
-        if duration is not None and startTime is not None:
-            try:
-                print(f"Downloading video range: {startTime}s to {startTime + duration}s")
-                download_with_range(videoPathURL, local_video_path, startTime, duration)
-                downloaded_video_path = local_video_path
-                # Use local file path - download_from_url will detect it's a local file
-                videoPathURL = local_video_path
-            except Exception as e:
-                print(f"✗ Failed to download video range: {e}")
-                if tenant and job_id and sns_topic_arn:
-                    notify(tenant, job_id, False, sns_topic_arn, {'error': f'Download failed: {str(e)}'})
-                return {
-                    'statusCode': 500,
-                    'body': json.dumps({
-                        'status': 'error',
-                        'error': f'Download failed: {str(e)}'
-                    })
-                }
+        if task_type == 'search':
+            return handle_search(input_data)
+        elif task_type == 'analyse' or task_type == 'analyze':
+            return handle_analyse(input_data)
         else:
-            # For full video downloads, the process_video function handles it via URL
-            print("Using full video URL for processing")
-        
-        # Status callback function for progress updates
-        def status_callback(message: str):
-            print(f"[STATUS] {message}")
-        
-        # Run the embedding pipeline
-        try:
-            process_video(
-                videoPathURL=videoPathURL,
-                transcriptPathURL=transcriptPathURL,
-                video_name=video_name,
-                video_id=video_id,
-                status_callback=status_callback
-            )
+            # Default to embedding task
+            return handle_embedding(input_data)
             
-            print("=" * 80)
-            print("Video Search Embeddings Processing Completed Successfully")
-            print("=" * 80)
-            
-            # Send success notification
-            if tenant and job_id and sns_topic_arn:
-                notify(tenant, job_id, True, sns_topic_arn, {
-                    'video_name': video_name,
-                    'video_id': video_id
-                })
-            
-            result = {
-                'statusCode': 200,
-                'body': json.dumps({
-                    'status': 'success',
-                    'message': 'Video embeddings processed successfully',
-                    'video_name': video_name,
-                    'video_id': video_id
-                })
-            }
-            
-            # Note: process_video handles cleanup of downloaded files internally
-            # Only clean up if we downloaded a range and process_video didn't handle it
-            # (process_video will clean up the video_path it gets from download_from_url)
-            return result
-            
-        except Exception as e:
-            error_message = str(e)
-            print(f"❌ Error processing embeddings: {error_message}")
-            import traceback
-            try:
-                traceback.print_exc()
-            except (OSError, ValueError) as exc:
-                # stderr might be closed, try to print to stdout instead
-                try:
-                    print(f"Traceback (stderr unavailable): {exc}", file=sys.stdout)
-                except:
-                    pass  # Both stdout and stderr unavailable, ignore
-            
-            # Send failure notification
-            if tenant and job_id and sns_topic_arn:
-                notify(tenant, job_id, False, sns_topic_arn, {'error': error_message})
-            
-            # Cleanup downloaded range file if process_video failed before handling it
-            if downloaded_video_path and os.path.exists(downloaded_video_path):
-                try:
-                    cleanup_temp_files(downloaded_video_path)
-                except Exception as cleanup_error:
-                    print(f"⚠ Warning: Could not clean up downloaded file: {cleanup_error}")
-            
-            return {
-                'statusCode': 500,
-                'body': json.dumps({
-                    'status': 'error',
-                    'error': error_message
-                })
-            }
-        
     except Exception as e:
         error_message = str(e)
         print(f"❌ Error in handler: {error_message}")
         import traceback
         try:
             traceback.print_exc()
-        except (OSError, ValueError) as exc:
-            # stderr might be closed, try to print to stdout instead
-            try:
-                print(f"Traceback (stderr unavailable): {exc}", file=sys.stdout)
-            except:
-                pass  # Both stdout and stderr unavailable, ignore
+        except (OSError, ValueError):
+            pass
         
-        # Send failure notification if we have the required info
-        input_data = job.get('input', {}) if isinstance(job, dict) else {}
-        tenant = input_data.get('tenant')
-        job_id = input_data.get('id')
-        sns_topic_arn = input_data.get('snsTopicArn')
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'status': 'error',
+                'error': error_message
+            })
+        }
+
+
+def handle_search(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle search requests.
+    
+    Supports both production (S3 pre-signed URLs) and local testing (file paths):
+    - For 'image' search: query can be S3 pre-signed URL (https://...) or local file path
+    - For 'audio' search: query can be S3 pre-signed URL (https://...) or local file path
+    - For 'text' search: query is a text string
+    
+    Args:
+        input_data: Dictionary with search_type, query, and optional parameters
+            - search_type: 'text', 'image', or 'audio'
+            - query: For image/audio: S3 pre-signed URL or local file path
+                    For text: search query string
+            - top_k: Optional, number of results (default: 8)
+            - filter: Optional metadata filter dictionary
         
+    Returns:
+        JSON response with search results
+    """
+    from src.retrieval.search import search_videos
+    from src.embedding.models import load_imagebind_model, load_captioning_model, load_whisper_model
+    from src.embedding.pipeline import init_pinecone_indexes
+    
+    search_type = input_data.get('search_type')
+    query = input_data.get('query') or input_data.get('search_query')  # Support both for backward compatibility
+    top_k = input_data.get('top_k', 8)
+    filter_dict = input_data.get('filter')
+    
+    # Validate required parameters
+    if not search_type:
+        raise ValueError("Missing required parameter: search_type")
+    if not query:
+        raise ValueError("Missing required parameter: query")
+    if search_type not in ('text', 'image', 'audio'):
+        raise ValueError(f"Invalid search_type: {search_type}. Must be 'text', 'image', or 'audio'.")
+    
+    print("=" * 80)
+    print(f"Starting Search: type={search_type}")
+    # For URLs, show truncated version; for local paths, show full path
+    if query.startswith('http://') or query.startswith('https://'):
+        print(f"Query URL: {query[:100]}{'...' if len(query) > 100 else ''}")
+    else:
+        print(f"Query: {query}")
+    print("=" * 80)
+    
+    # Initialize Pinecone indexes
+    video_index, audio_index, text_index, desc_index = init_pinecone_indexes()
+    if not all([video_index, audio_index, text_index, desc_index]):
+        raise Exception("Failed to initialize Pinecone indexes")
+    
+    # Load models
+    embedding_model, device = load_imagebind_model()
+    caption_processor, caption_model = load_captioning_model()
+    whisper_model = load_whisper_model() if search_type == 'audio' else None
+    
+    # Perform search with scene merging enabled (matching UI behavior)
+    # Scene merging combines overlapping or nearby clips (within 3 seconds) from the same video
+    results = search_videos(
+        search_type=search_type,
+        query=query,  # Changed from search_query to query
+        video_index=video_index,
+        audio_index=audio_index,
+        text_index=text_index,
+        desc_index=desc_index,
+        embedding_model=embedding_model,
+        caption_processor=caption_processor,
+        caption_model=caption_model,
+        whisper_model=whisper_model,
+        device=device,
+        top_k=top_k,
+        filter_dict=filter_dict,
+        merge_clips=True,  # Enable scene merging (same as UI) - merges overlapping/nearby clips
+        gap_seconds=3  # Merge clips within 3 seconds of each other
+    )
+    
+    # Convert results to JSON-serializable format matching app-code-ref.py UI format
+    # Results are already sorted by score (highest first) and merged from search_videos()
+    serialized_results = []
+    for result in results:
+        # Handle both Pinecone Match objects and dict-like objects
+        if hasattr(result, 'score'):
+            score = float(result.score)
+        elif isinstance(result, dict):
+            score = float(result.get('score', 0.0))
+        else:
+            score = 0.0
+        
+        if hasattr(result, 'metadata'):
+            metadata = dict(result.metadata) if result.metadata else {}
+        elif isinstance(result, dict):
+            metadata = dict(result.get('metadata', {}))
+        else:
+            metadata = {}
+        
+        # Categorize score (matching app-code-ref.py logic)
+        if score >= 0.5:
+            category = "HIGH"
+        elif score >= 0.3:
+            category = "MEDIUM"
+        else:
+            category = "LOW"
+        
+        # Format timestamps as HH:MM:SS (matching UI format)
+        start_time = metadata.get('start_time', 0.0)
+        end_time = metadata.get('end_time', 0.0)
+        start_timestamp = time.strftime('%H:%M:%S', time.gmtime(start_time)) if start_time else "00:00:00"
+        end_timestamp = time.strftime('%H:%M:%S', time.gmtime(end_time)) if end_time else "00:00:00"
+        
+        # Build result object matching UI display format
+        result_obj = {
+            'score': round(score, 3),  # Round to 3 decimal places
+            'category': category,  # HIGH, MEDIUM, or LOW
+            'video_name': metadata.get('video_name', 'Unknown'),
+            'video_id': metadata.get('video_id', metadata.get('video_doc_id', '')),
+            'start_time': start_time,  # Raw seconds (float)
+            'end_time': end_time,  # Raw seconds (float)
+            'start_timestamp': start_timestamp,  # Formatted as HH:MM:SS
+            'end_timestamp': end_timestamp,  # Formatted as HH:MM:SS
+            'time_range': f"{start_timestamp} - {end_timestamp}",  # Display format
+            'transcript': metadata.get('transcript', ''),
+            'description': metadata.get('description', ''),
+            'source': metadata.get('source', 'N/A'),  # Which modalities matched (e.g., "video, text")
+            'scene_uuid': metadata.get('scene_uuid', ''),
+            'scene_index': metadata.get('scene_index', -1),
+            # Include full metadata for backward compatibility
+            'metadata': metadata
+        }
+        
+        serialized_results.append(result_obj)
+    
+    # Ensure results are sorted by score (highest first) - should already be sorted, but double-check
+    serialized_results.sort(key=lambda x: x['score'], reverse=True)
+    
+    print(f"Search complete: {len(serialized_results)} results found (with scene merging enabled)")
+    print("=" * 80)
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'status': 'success',
+            'search_type': search_type,
+            'results_count': len(serialized_results),
+            'scene_merging': True,  # Indicates that overlapping/nearby scenes were merged
+            'merge_gap_seconds': 3,  # Clips within 3 seconds were merged
+            'results': serialized_results
+        }, indent=2)  # Pretty print JSON for readability
+    }
+
+
+def handle_analyse(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle video analysis requests using LLM.
+    
+    Args:
+        input_data: Dictionary with attachment_id and query
+        
+    Returns:
+        JSON response with analysis results
+    """
+    from src.retrieval.analyze import analyze_video, get_video_data_from_pinecone
+    from src.retrieval.search import search_videos
+    from src.embedding.models import load_imagebind_model, load_captioning_model
+    from src.embedding.pipeline import init_pinecone_indexes
+    
+    attachment_id = input_data.get('attachment_id')
+    query = input_data.get('query')
+    
+    # Validate required parameters
+    if not attachment_id:
+        raise ValueError("Missing required parameter: attachment_id")
+    if not query:
+        raise ValueError("Missing required parameter: query")
+    
+    print("=" * 80)
+    print("Starting Video Analysis")
+    print("=" * 80)
+    print(f"Attachment ID: {attachment_id}")
+    print(f"Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+    print("=" * 80)
+    
+    # Initialize Pinecone indexes
+    print("Initializing Pinecone indexes...")
+    video_index, audio_index, text_index, desc_index = init_pinecone_indexes()
+    
+    if not all([video_index, audio_index, text_index, desc_index]):
+        raise Exception("Failed to initialize Pinecone indexes. Check credentials.")
+    
+    # Fetch video data from Pinecone (transcript segments and duration)
+    print(f"Fetching video data from Pinecone for attachment_id: {attachment_id}...")
+    transcript_segments, video_duration = get_video_data_from_pinecone(
+        video_doc_id=attachment_id,
+        text_index=text_index,
+        max_scenes=1000
+    )
+    
+    if not transcript_segments:
+        raise ValueError(f"No transcript data found for attachment_id: {attachment_id}")
+    
+    if not video_duration:
+        raise ValueError(f"Could not determine video duration for attachment_id: {attachment_id}")
+    
+    print(f"Found {len(transcript_segments)} transcript segments")
+    print(f"Video duration: {video_duration:.2f} seconds")
+    
+    # Initialize OpenAI client
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is required for analysis")
+    
+    try:
+        import openai
+        openai_client = openai.OpenAI(api_key=openai_api_key)
+    except ImportError:
+        raise ImportError("OpenAI library is not installed. Install with: pip install openai")
+    except Exception as e:
+        raise Exception(f"Failed to initialize OpenAI client: {e}")
+    
+    # Load models for potential RAG-based search (if needed for SPECIFIC_QUESTION)
+    print("Loading models for analysis...")
+    embedding_model, device = load_imagebind_model()
+    caption_processor, caption_model = load_captioning_model()
+    
+    if not embedding_model:
+        raise Exception("Failed to load embedding model")
+    
+    print(f"Using device: {device}")
+    
+    # Perform analysis
+    # The analyze_video function will:
+    # 1. Detect query intent (SPECIFIC_QUESTION vs HOLISTIC_REQUEST)
+    # 2. For SPECIFIC_QUESTION: Perform RAG-based search and use results
+    # 3. For HOLISTIC_REQUEST: Use full transcript segments
+    print("Performing analysis...")
+    
+    # For SPECIFIC_QUESTION, we may need to perform a search first
+    # Let analyze_video handle this internally by passing the necessary components
+    analysis_result = analyze_video(
+        prompt=query,
+        video_doc_id=attachment_id,
+        transcript_segments=transcript_segments,
+        video_duration=video_duration,
+        search_results=None,  # Will be generated internally if needed
+        embedding_model=embedding_model,
+        device=device,
+        openai_client=openai_client,
+        text_index=text_index,
+        desc_index=desc_index
+    )
+    
+    if not analysis_result:
+        raise Exception("Analysis failed - no result returned")
+    
+    print("Analysis completed successfully")
+    
+    # Format response
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'status': 'success',
+            'attachment_id': attachment_id,
+            'query': query,
+            'video_duration': video_duration,
+            'transcript_segments_count': len(transcript_segments),
+            'analysis': analysis_result
+        }, indent=2)
+    }
+
+
+def handle_embedding(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle embedding/video processing requests.
+    
+    Args:
+        input_data: Dictionary with video processing parameters
+        
+    Returns:
+        JSON response with processing status
+    """
+    videoPathURL = input_data.get('videoPathURL')
+    transcriptPathURL = input_data.get('transcriptPathURL')
+    video_name = input_data.get('video_name')
+    video_id = input_data.get('video_id')
+    job_id = input_data.get('id')
+    tenant = input_data.get('tenant')
+    sns_topic_arn = input_data.get('snsTopicArn')
+    duration = input_data.get('duration', None)
+    startTime = input_data.get('startTime', None)
+    
+    # Validate required parameters
+    if not videoPathURL:
+        raise ValueError("Missing required parameter: videoPathURL")
+    if not transcriptPathURL:
+        raise ValueError("Missing required parameter: transcriptPathURL")
+    if not video_name:
+        raise ValueError("Missing required parameter: video_name")
+    
+    print("=" * 80)
+    print("Starting Video Search Embeddings Processing")
+    print("=" * 80)
+    print(f"Video URL: {videoPathURL[:100]}...")
+    print(f"Transcript URL: {transcriptPathURL[:100]}...")
+    print(f"Video Name: {video_name}")
+    print(f"Video ID: {video_id or 'auto-generated'}")
+    print(f"Job ID: {job_id}")
+    print("=" * 80)
+    
+    # Set up temporary file paths in /tmp
+    local_video_path = '/tmp/input_video.mp4'
+    downloaded_video_path = None
+    
+    # Download video if range is specified (for partial video processing)
+    if duration is not None and startTime is not None:
+        try:
+            print(f"Downloading video range: {startTime}s to {startTime + duration}s")
+            download_with_range(videoPathURL, local_video_path, startTime, duration)
+            downloaded_video_path = local_video_path
+            videoPathURL = local_video_path
+        except Exception as e:
+            print(f"✗ Failed to download video range: {e}")
+            if tenant and job_id and sns_topic_arn:
+                notify(tenant, job_id, False, sns_topic_arn, {'error': f'Download failed: {str(e)}'})
+            return {
+                'statusCode': 500,
+                'body': json.dumps({
+                    'status': 'error',
+                    'error': f'Download failed: {str(e)}'
+                })
+            }
+    else:
+        print("Using full video URL for processing")
+    
+    # Status callback function for progress updates
+    def status_callback(message: str):
+        print(f"[STATUS] {message}")
+    
+    # Run the embedding pipeline
+    try:
+        process_video(
+            videoPathURL=videoPathURL,
+            transcriptPathURL=transcriptPathURL,
+            video_name=video_name,
+            video_id=video_id,
+            status_callback=status_callback
+        )
+        
+        print("=" * 80)
+        print("Video Search Embeddings Processing Completed Successfully")
+        print("=" * 80)
+        
+        # Send success notification
+        if tenant and job_id and sns_topic_arn:
+            notify(tenant, job_id, True, sns_topic_arn, {
+                'video_name': video_name,
+                'video_id': video_id
+            })
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'status': 'success',
+                'message': 'Video embeddings processed successfully',
+                'video_name': video_name,
+                'video_id': video_id
+            })
+        }
+        
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ Error processing embeddings: {error_message}")
+        import traceback
+        try:
+            traceback.print_exc()
+        except (OSError, ValueError):
+            pass
+        
+        # Send failure notification
         if tenant and job_id and sns_topic_arn:
             notify(tenant, job_id, False, sns_topic_arn, {'error': error_message})
+        
+        # Cleanup downloaded range file if process_video failed before handling it
+        if downloaded_video_path and os.path.exists(downloaded_video_path):
+            try:
+                cleanup_temp_files(downloaded_video_path)
+            except Exception:
+                pass
         
         return {
             'statusCode': 500,
@@ -424,3 +715,4 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 # For RunPod serverless (only start if runpod is available)
 if runpod is not None:
     runpod.serverless.start({"handler": handler})
+

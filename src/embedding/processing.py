@@ -50,6 +50,7 @@ def extract_audio_from_video(video_path: str) -> Optional[str]:
 def find_segment_by_scene_end(scene_end_time: float, segments: List[Dict], tolerance: float = 0.5) -> Optional[Dict]:
     """
     Finds the transcript segment whose 'end' time matches the scene's end time.
+    DEPRECATED: Use find_segments_in_scene_range instead to get all overlapping segments.
     """
     if not segments:
         return None
@@ -84,6 +85,50 @@ def find_segment_by_scene_end(scene_end_time: float, segments: List[Dict], toler
                 best_match = segment
     
     return best_match
+
+
+def find_segments_in_scene_range(scene_start_time: float, scene_end_time: float, segments: List[Dict], max_length: int = 10000) -> str:
+    """
+    Finds all transcript segments that overlap with the scene's time range
+    and concatenates their text.
+    
+    Args:
+        scene_start_time: Scene start time in seconds
+        scene_end_time: Scene end time in seconds
+        segments: List of transcript segments, each with 'start', 'end', and 'text' keys
+        max_length: Maximum length of transcript text (to prevent Pinecone metadata size issues)
+                    Pinecone metadata limit is 40KB, so ~10KB of text is safe
+        
+    Returns:
+        Concatenated transcript text from all overlapping segments, or empty string if none found
+    """
+    if not segments:
+        return ''
+    
+    overlapping_segments = []
+    
+    for segment in segments:
+        segment_start = segment.get('start', 0)
+        segment_end = segment.get('end', 0)
+        segment_text = segment.get('text', '').strip()
+        
+        # Check if segment overlaps with scene time range
+        # Overlap occurs if: segment_start < scene_end AND segment_end > scene_start
+        if segment_start < scene_end_time and segment_end > scene_start_time and segment_text:
+            overlapping_segments.append((segment_start, segment_text))
+    
+    # Sort by start time to maintain chronological order
+    overlapping_segments.sort(key=lambda x: x[0])
+    
+    # Concatenate all text with spaces
+    transcript_text = ' '.join(text for _, text in overlapping_segments)
+    
+    # Truncate if too long (to prevent Pinecone metadata size limit issues)
+    # Pinecone metadata limit is 40KB, so we keep transcripts under 10KB to be safe
+    if len(transcript_text) > max_length:
+        transcript_text = transcript_text[:max_length].rsplit(' ', 1)[0] + '...'
+    
+    return transcript_text.strip()
 
 
 def detect_scenes_with_adaptive_detector(video_path: str) -> List:
@@ -236,10 +281,15 @@ def prepare_scene_data(args: Tuple) -> Optional[Dict]:
         except Exception:
             scene_audio_path = ""
     
+    # Get transcript text from all segments overlapping with this scene
+    transcript_text = ''
+    if transcript_segments:
+        transcript_text = find_segments_in_scene_range(abs_start_time, abs_end_time, transcript_segments)
+    
     return {
         "pil_image": resize_frame_optimized(frame_np),
         "audio_path": scene_audio_path,
-        "transcript": find_segment_by_scene_end(abs_end_time, transcript_segments).get('text', '').strip() if find_segment_by_scene_end(abs_end_time, transcript_segments) else '',
+        "transcript": transcript_text,
         "video_name": video_name,
         "video_id": video_id,
         "scene_global_index": global_scene_index,

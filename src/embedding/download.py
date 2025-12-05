@@ -114,16 +114,52 @@ def download_from_url(url: str, output_path: Optional[str] = None, chunk_size: i
 
 def download_transcript_from_url(url: str) -> Optional[list]:
     """
-    Downloads and parses a transcript JSON from a pre-signed S3 URL.
+    Downloads and parses a transcript JSON from a pre-signed S3 URL or local file path.
     
     Args:
-        url: Pre-signed S3 URL to transcript JSON file
+        url: Pre-signed S3 URL to transcript JSON file, or local file path (file:// or /path/to/file)
         
     Returns:
         List of transcript segments, or None if download/parse failed
     """
     import json
     
+    # Check if it's a local file path (file:// protocol or absolute path)
+    local_path = None
+    if url.startswith('file://'):
+        local_path = url[7:]  # Remove 'file://' prefix
+    elif url.startswith('/') and os.path.exists(url):
+        local_path = url
+    
+    # If it's a local file, read it directly
+    if local_path:
+        try:
+            if not os.path.exists(local_path):
+                print(f"Error: Local transcript file does not exist: {local_path}")
+                return None
+            
+            with open(local_path, 'r', encoding='utf-8') as f:
+                transcript_data = json.load(f)
+            
+            # Handle different transcript formats
+            if isinstance(transcript_data, list):
+                return transcript_data
+            elif isinstance(transcript_data, dict) and 'segments' in transcript_data:
+                return transcript_data['segments']
+            elif isinstance(transcript_data, dict) and 'transcript' in transcript_data:
+                return transcript_data['transcript']
+            else:
+                print(f"Warning: Unexpected transcript format in local file. Returning as-is.")
+                return transcript_data if isinstance(transcript_data, list) else None
+                
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON from local transcript file: {e}")
+            return None
+        except Exception as e:
+            print(f"Error reading local transcript file: {e}")
+            return None
+    
+    # Otherwise, download from URL
     try:
         response = requests.get(url, timeout=60)
         response.raise_for_status()
