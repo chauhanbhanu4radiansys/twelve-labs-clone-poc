@@ -15,6 +15,9 @@
 # Usage for ANALYSE:
 #   ./test_local.sh analyse <attachment_id> "your analysis query"
 #   ./test_local.sh analyze <attachment_id> "your analysis query"
+#
+# Options:
+#   --no-build    Skip Docker image build (use existing image or fail if not found)
 
 set -e
 
@@ -32,6 +35,13 @@ IMAGE_TAG="latest"
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Check for --no-build flag
+SKIP_BUILD=false
+if [ "$1" = "--no-build" ]; then
+    SKIP_BUILD=true
+    shift  # Remove --no-build flag
+fi
 
 # Determine task type from first argument
 TASK_TYPE="embedding"
@@ -147,8 +157,14 @@ fi
 
 ENV_PATH=$(realpath ".env" 2>/dev/null || echo "")
 
-# Check if Docker image exists, if not, build it
+# Check if Docker image exists, if not, build it (unless --no-build flag is set)
 if ! docker images | grep -q "^${IMAGE_NAME}.*${IMAGE_TAG}"; then
+    if [ "$SKIP_BUILD" = true ]; then
+        echo -e "${RED}Error: Docker image ${IMAGE_NAME}:${IMAGE_TAG} not found and --no-build flag is set.${NC}"
+        echo -e "${YELLOW}Please build the image first with: ./test_docker_build.sh${NC}"
+        echo -e "${YELLOW}Or run without --no-build flag to build automatically.${NC}"
+        exit 1
+    fi
     echo -e "${YELLOW}Docker image ${IMAGE_NAME}:${IMAGE_TAG} not found.${NC}"
     echo -e "${YELLOW}Building Docker image...${NC}"
     echo ""
@@ -162,15 +178,20 @@ else
     # Check if local.py exists in image, if not, we'll mount it
     if ! docker run --rm "${IMAGE_NAME}:${IMAGE_TAG}" test -f /local.py 2>/dev/null; then
         if [ -z "$LOCAL_PY_PATH" ] || [ ! -f "$LOCAL_PY_PATH" ]; then
-            echo -e "${YELLOW}Warning: /local.py not found in image and local file not found.${NC}"
-            echo -e "${YELLOW}Rebuilding image to include local.py...${NC}"
-            echo ""
-            ./test_docker_build.sh
-            if [ $? -ne 0 ]; then
-                echo -e "${RED}Failed to build Docker image. Exiting.${NC}"
-                exit 1
+            if [ "$SKIP_BUILD" = true ]; then
+                echo -e "${YELLOW}Warning: /local.py not found in image, but --no-build flag is set.${NC}"
+                echo -e "${YELLOW}Will attempt to mount local.py from host if available.${NC}"
+            else
+                echo -e "${YELLOW}Warning: /local.py not found in image and local file not found.${NC}"
+                echo -e "${YELLOW}Rebuilding image to include local.py...${NC}"
+                echo ""
+                ./test_docker_build.sh
+                if [ $? -ne 0 ]; then
+                    echo -e "${RED}Failed to build Docker image. Exiting.${NC}"
+                    exit 1
+                fi
+                echo ""
             fi
-            echo ""
         else
             echo -e "${GREEN}Mounting local.py from host (no rebuild needed)${NC}"
         fi
