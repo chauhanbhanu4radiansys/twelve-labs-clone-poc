@@ -1,7 +1,12 @@
 # Core Python dependencies for embedding pipeline
 # Install with: pip install -r requirements.txt
-
-# PyTorch and related
+#
+# IMPORTANT: For GPU support, PyTorch must be installed with CUDA support.
+# Use install_pytorch_cuda.sh script or install manually:
+#   pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+#
+# PyTorch and related (CPU-only fallback - will be replaced by CUDA version if install_pytorch_cuda.sh is used)
+# For GPU: Install using install_pytorch_cuda.sh script first, then install other requirements
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
@@ -42,6 +47,7 @@ boto3>=1.28.0
 typing-extensions>=4.5.0
 setuptools>=69.5.1
 python-dotenv>=1.0.0
+tqdm>=4.65.0
 
 # Optional: Whisper (not used in pipeline but may be needed for other parts)
 openai-whisper>=20230918

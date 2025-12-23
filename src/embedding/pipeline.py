@@ -365,7 +365,8 @@ def process_video(
         # Load models
         status_callback("Loading models...")
         embedding_model, device = load_imagebind_model()
-        caption_processor, caption_model = load_captioning_model()
+        # Load caption model on the same device as embedding model
+        caption_processor, caption_model = load_captioning_model(device=device)
         
         # VERIFY GPU USAGE - Critical for performance
         status_callback("\n" + "="*80)

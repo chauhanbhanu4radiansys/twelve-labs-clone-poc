@@ -228,9 +228,13 @@ def load_whisper_model(model_name: str = "base"):
         return None
 
 
-def load_captioning_model() -> Tuple[Optional[any], Optional[any]]:
+def load_captioning_model(device: Optional[str] = None) -> Tuple[Optional[any], Optional[any]]:
     """
     Loads the BLIP image captioning model and processor.
+    
+    Args:
+        device: Device to load model on (e.g., "cuda:0" or "cpu"). 
+                If None, auto-detects: uses CUDA if available, else CPU.
     
     Returns:
         Tuple of (processor, model) or (None, None) if not available
@@ -243,10 +247,27 @@ def load_captioning_model() -> Tuple[Optional[any], Optional[any]]:
         processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
         model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
         
-        if torch.cuda.is_available():
-            model.to("cuda:0")
+        # Determine device
+        if device is None:
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
         
-        print("BLIP model loaded successfully")
+        # Move model to device
+        try:
+            model.to(device)
+            if device.startswith('cuda'):
+                # Verify model is actually on GPU
+                actual_device = next(model.parameters()).device
+                if actual_device.type != 'cuda':
+                    print(f"Warning: BLIP model requested GPU but is on {actual_device}")
+        except Exception as e:
+            print(f"Warning: Could not move BLIP model to {device}: {e}")
+            # Try CPU as fallback
+            if device.startswith('cuda'):
+                print("Falling back to CPU for BLIP model...")
+                device = "cpu"
+                model.to(device)
+        
+        print(f"BLIP model loaded successfully on {device}")
         return processor, model
     except Exception as e:
         print(f"Could not load captioning model: {e}")

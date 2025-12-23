@@ -1,8 +1,9 @@
 # Keep your stable RunPod base image
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# Using available RunPod image (PyTorch will be installed explicitly below)
+FROM runpod/pytorch:1.0.3-cu1290-torch290-ubuntu2204
 
-# Use Python 3.11 from base image (already installed)
-RUN python3.11 -m pip install --upgrade pip
+# Use Python 3 from base image (already installed)
+RUN python3 -m pip install --upgrade pip
 
 # CRITICAL: Remove conflicting CUDA compatibility libraries that cause Error 803
 RUN rm -rf /usr/local/cuda*/compat/libcuda.so* || true && \
@@ -15,7 +16,7 @@ RUN set -e && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl tar xz-utils wget git ca-certificates \
     dnsutils iputils-ping \
-    # CUDA runtime libraries
+    # CUDA runtime libraries (base image may already have compatible versions)
     libcudnn8 \
     libcublas-12-4 \
     libcufft-12-4 \
@@ -52,9 +53,9 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 # Install PyTorch 2.4.0 with CUDA 12.4 (from setup.sh)
-RUN python3.11 -m pip install --no-cache-dir --upgrade pip && \
-    python3.11 -m pip uninstall -y torch torchvision torchaudio || true && \
-    python3.11 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    python3 -m pip uninstall -y torch torchvision torchaudio || true && \
+    python3 -m pip install --no-cache-dir \
         torch==2.4.0 \
         torchvision==0.19.0 \
         torchaudio==2.4.0 \
@@ -62,7 +63,7 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip && \
 
 # Install ImageBind from GitHub (from setup.sh)
 RUN echo "Installing ImageBind from GitHub..." && \
-    python3.11 -m pip install --no-cache-dir git+https://github.com/facebookresearch/ImageBind.git && \
+    python3 -m pip install --no-cache-dir git+https://github.com/facebookresearch/ImageBind.git && \
     echo "✓ ImageBind installed"
 
 # Copy requirements.txt
@@ -71,7 +72,7 @@ COPY ./gpu/requirements.txt /requirements.txt
 # Install all Python dependencies from requirements.txt (from setup.sh)
 RUN if [ -f /requirements.txt ]; then \
         echo "Installing Python dependencies from requirements.txt..." && \
-        python3.11 -m pip install --no-cache-dir -r /requirements.txt && \
+        python3 -m pip install --no-cache-dir -r /requirements.txt && \
         echo "✓ All Python dependencies installed"; \
     else \
         echo "⚠ Warning: requirements.txt not found. Skipping dependency installation."; \
@@ -99,7 +100,7 @@ RUN echo "==========================================" && \
 
 # Pre-download ImageBind model (~5GB) to /.checkpoints/imagebind_huge.pth
 RUN echo "Pre-downloading ImageBind model (this may take several minutes)..." && \
-    python3.11 -c "import os; \
+    python3 -c "import os; \
     import sys; \
     sys.path.insert(0, '/'); \
     from imagebind.models import imagebind_model; \
@@ -116,7 +117,7 @@ RUN echo "Pre-downloading ImageBind model (this may take several minutes)..." &&
 # Pre-download BLIP captioning model (~2GB) to HuggingFace cache
 # Explicitly download all files including safetensors/tensors to avoid runtime downloads
 RUN echo "Pre-downloading BLIP captioning model (this may take several minutes)..." && \
-    python3.11 << 'PYEOF'
+    python3 << 'PYEOF'
 import os
 os.environ['HF_HOME'] = '/model_cache/huggingface'
 os.environ['TRANSFORMERS_CACHE'] = '/model_cache/transformers'
@@ -184,5 +185,5 @@ ENV VFXAI_FFMPEG_DECODE_FLAGS="-hwaccel cuda -hwaccel_output_format cuda"
 ENV VFXAI_FFMPEG_ENCODE_FLAGS="-c:v h264_nvenc -preset p4 -cq 25 -pix_fmt yuv420p"
 ENV VFXAI_NVENC_FALLBACK_ENABLED=1
 
-CMD ["python3.11", "-u", "/handler.py"]
+CMD ["python3", "-u", "/handler.py"]
 

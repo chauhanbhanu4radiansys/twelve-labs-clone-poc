@@ -26,6 +26,7 @@ import sys
 import argparse
 import uuid
 from pathlib import Path
+import torch
 
 # Load .env file
 try:
@@ -73,23 +74,27 @@ Examples:
   # Using URLs:
   python create_embeddings.py --video-url "https://s3.amazonaws.com/bucket/video.mp4?..." --transcript-url "https://..." --name "my_video"
   
+  # Mixed: local video + S3 transcript URL:
+  python create_embeddings.py --video video.mp4 --transcript-url "https://s3.amazonaws.com/bucket/transcript.json?..." --name "my_video"
+  
+  # Mixed: S3 video URL + local transcript:
+  python create_embeddings.py --video-url "https://s3.amazonaws.com/bucket/video.mp4?..." --transcript transcript.json --name "my_video"
+  
   # With custom video ID:
   python create_embeddings.py --video video.mp4 --transcript transcript.json --name "my_video" --video-id "custom-123"
         """
     )
     
-    # Input options - either local files or URLs
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('--video', type=str,
-                            help='Path to local video file')
-    input_group.add_argument('--video-url', type=str,
-                            help='URL to video file (S3 pre-signed URL or HTTP/HTTPS)')
+    # Input options - can mix local files and URLs
+    parser.add_argument('--video', type=str, default=None,
+                       help='Path to local video file')
+    parser.add_argument('--video-url', type=str, default=None,
+                       help='URL to video file (S3 pre-signed URL or HTTP/HTTPS)')
     
-    transcript_group = parser.add_mutually_exclusive_group(required=True)
-    transcript_group.add_argument('--transcript', type=str,
-                                 help='Path to local transcript JSON file')
-    transcript_group.add_argument('--transcript-url', type=str,
-                                 help='URL to transcript JSON file (S3 pre-signed URL or HTTP/HTTPS)')
+    parser.add_argument('--transcript', type=str, default=None,
+                       help='Path to local transcript JSON file')
+    parser.add_argument('--transcript-url', type=str, default=None,
+                       help='URL to transcript JSON file (S3 pre-signed URL or HTTP/HTTPS)')
     
     parser.add_argument('--name', '--video-name', dest='video_name', type=str, required=True,
                        help='Name/identifier for the video')
@@ -98,11 +103,21 @@ Examples:
     
     args = parser.parse_args()
     
+    # Validate that at least one video source is provided
+    if not args.video and not args.video_url:
+        print("Error: Either --video or --video-url must be provided")
+        return 1
+    
+    # Validate that at least one transcript source is provided
+    if not args.transcript and not args.transcript_url:
+        print("Error: Either --transcript or --transcript-url must be provided")
+        return 1
+    
     # Determine video and transcript sources
     video_source = args.video or args.video_url
     transcript_source = args.transcript or args.transcript_url
     
-    # Check if using local files
+    # Check if using local files (for either video or transcript)
     using_local_files = args.video is not None or args.transcript is not None
     
     # Validate local files exist
@@ -161,16 +176,21 @@ Examples:
         import shutil
         import tempfile
         
-        # Create temporary URLs by copying to temp files with proper extensions
-        # Actually, let's modify the approach - check if path exists and is local
+        # Handle mixed inputs: local video + URL transcript, or both local, etc.
         video_path = args.video if args.video else None
-        transcript_path = args.transcript if args.transcript else None
         
-        # If local files, use them directly
-        # We need to modify process_video to accept local paths OR create a wrapper
+        # If video is URL, download it first
+        if args.video_url:
+            print("Downloading video from URL...")
+            from src.embedding.download import download_from_url
+            video_path = download_from_url(args.video_url, progress_callback=print)
+            if not video_path or not os.path.exists(video_path):
+                print(f"Error: Failed to download video from URL")
+                return 1
+            print(f"✓ Video downloaded to: {video_path}")
         
-        # For simplicity, let's create a modified version that handles local files
-        print("Processing with local files...")
+        # Process with local video file (either provided directly or downloaded)
+        print("Processing video...")
         
         # Import the necessary components
         from src.embedding.pipeline import (
@@ -201,10 +221,12 @@ Examples:
             
             print("✓ Indexes initialized")
             
-            # Load transcript if local file
+            # Load transcript - handle both local file and URL
             transcript_segments = None
-            if transcript_path:
-                print(f"Loading transcript from: {transcript_path}")
+            if args.transcript:
+                # Local transcript file
+                transcript_path = args.transcript
+                print(f"Loading transcript from local file: {transcript_path}")
                 with open(transcript_path, 'r') as f:
                     transcript_data = json.load(f)
                     # Handle different transcript formats
@@ -215,17 +237,99 @@ Examples:
                     else:
                         print("Warning: Unknown transcript format")
                 print(f"✓ Loaded {len(transcript_segments) if transcript_segments else 0} transcript segments")
+            elif args.transcript_url:
+                # Download transcript from URL
+                print(f"Downloading transcript from URL...")
+                from src.embedding.download import download_transcript_from_url
+                transcript_segments = download_transcript_from_url(args.transcript_url)
+                if transcript_segments:
+                    print(f"✓ Loaded {len(transcript_segments)} transcript segments from URL")
+                else:
+                    print("Warning: Could not download transcript from URL")
             
             # Load models
             print("Loading models...")
+            
+            # Check CUDA availability first
+            print(f"CUDA Available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                print(f"CUDA Version: {torch.version.cuda}")
+                print(f"GPU Count: {torch.cuda.device_count()}")
+                try:
+                    print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+                    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB")
+                except Exception as e:
+                    print(f"Warning: Could not get GPU details: {e}")
+            print()
+            
             embedding_model, device = load_imagebind_model()
-            caption_processor, caption_model = load_captioning_model()
+            # Load caption model on the same device as embedding model
+            caption_processor, caption_model = load_captioning_model(device=device)
             
             if not embedding_model:
                 print("Error: Failed to load ImageBind model")
                 return 1
             
-            print(f"✓ Models loaded on {device}")
+            # Verify models are actually on the correct device and fix if needed
+            print("\n" + "="*80)
+            print("VERIFYING GPU USAGE...")
+            
+            # Check actual device of embedding model
+            try:
+                embedding_device = next(embedding_model.parameters()).device
+                actual_device_type = embedding_device.type
+                actual_device_index = embedding_device.index if embedding_device.index is not None else 0
+                
+                # If CUDA is available but model is on CPU, try to move it
+                if torch.cuda.is_available() and actual_device_type == 'cpu':
+                    print("⚠️  WARNING: CUDA available but model is on CPU!")
+                    print("  Attempting to move models to GPU...")
+                    try:
+                        device = f"cuda:{actual_device_index}"
+                        embedding_model.to(device)
+                        if caption_model:
+                            caption_model.to(device)
+                        # Verify move was successful
+                        new_device = next(embedding_model.parameters()).device
+                        if new_device.type == 'cuda':
+                            print(f"  ✓ Models successfully moved to {device}")
+                            actual_device_type = 'cuda'
+                        else:
+                            print(f"  ✗ Failed to move models to GPU (still on {new_device})")
+                    except Exception as e:
+                        print(f"  ✗ Failed to move models to GPU: {e}")
+                        print("  Continuing with CPU (will be slow)")
+                
+                # Display final status
+                if actual_device_type == 'cuda':
+                    gpu_name = torch.cuda.get_device_name(actual_device_index)
+                    gpu_memory = torch.cuda.get_device_properties(actual_device_index).total_memory / (1024**3)
+                    print("✅ GPU ACCELERATION ENABLED")
+                    print(f"  Embedding Model Device: {embedding_device}")
+                    if caption_model:
+                        caption_device = next(caption_model.parameters()).device
+                        print(f"  Caption Model Device: {caption_device}")
+                    print(f"  GPU: {gpu_name}")
+                    print(f"  GPU Memory: {gpu_memory:.2f} GB")
+                    # Update device variable to match actual device
+                    device = str(embedding_device)
+                else:
+                    print("❌ RUNNING ON CPU - VERY SLOW!")
+                    print(f"  Device: {embedding_device}")
+                    print(f"  CUDA Available: {torch.cuda.is_available()}")
+                    if torch.cuda.is_available():
+                        print("  ⚠️  CUDA is available but models are on CPU!")
+                        print("  This may be due to:")
+                        print("    - PyTorch CPU-only installation")
+                        print("    - GPU memory issues")
+                        print("    - CUDA driver/runtime mismatch")
+                    device = "cpu"
+                    
+            except Exception as e:
+                print(f"⚠️  Warning: Could not verify device: {e}")
+                print(f"  Reported device: {device}")
+            
+            print("="*80 + "\n")
             
             # Extract audio
             print("Extracting audio from video...")
@@ -269,14 +373,14 @@ Examples:
                 chunk_args_list = []
                 
                 for i, (chunk_start, chunk_end, chunk_path) in enumerate(chunks):
-                    args = (
+                    chunk_args = (
                         chunk_path, chunk_start, args.video_name, video_id, chunk_scene_offset,
                         transcript_segments, full_audio_segment,
                         video_upload_manager, audio_upload_manager, text_upload_manager, desc_upload_manager,
                         embedding_model, caption_processor, caption_model, device,
                         print
                     )
-                    chunk_args_list.append(args)
+                    chunk_args_list.append(chunk_args)
                     chunk_scene_offset += scene_counts[i]
                 
                 futures = [executor.submit(process_video_chunk, arg) for arg in chunk_args_list]
@@ -339,7 +443,7 @@ Examples:
             return 1
     
     else:
-        # Use URLs - call process_video directly
+        # Both video and transcript are URLs - call process_video directly
         try:
             print("Processing with URLs...")
             process_video(
